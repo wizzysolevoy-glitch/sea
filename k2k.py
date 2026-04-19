@@ -1,52 +1,194 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-OSINT FRAMEWORK v8.0
-Monetization + Referrals + Mirrors + Telegram Stars
+OSINT FRAMEWORK v15.2 ENTERPRISE
+✅ Fixed: Nick search rate-limiting & accuracy
+✅ Fixed: EXIF now supports documents/files
+✅ Added: /ban & /unban admin commands
+✅ Added: Global ban check & improved balance
+✅ Optimized: DB connections, error handling, state management
 """
 import asyncio
 import logging
 import time
 import re
-import io
 import os
 import json
 import secrets
+import hashlib
+import base64
+import random
+import string
+import traceback
+import io
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, LabeledPrice
+from typing import Dict, List, Optional, Tuple, Any, Union, Callable
+from dataclasses import dataclass, field
+from enum import Enum, auto
+from collections import defaultdict
+from functools import wraps
+
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
+from telegram.error import BadRequest, Forbidden, NetworkError, TelegramError, TimedOut
 import aiohttp
 import phonenumbers
-from phonenumbers import geocoder, carrier, timezone
+from phonenumbers import geocoder, carrier, timezone, NumberParseException
 import aiosqlite
+from PIL import Image, ExifTags
 
 # ==========================================================
-# 🔧 КОНФИГУРАЦИЯ
+# 🔧 ГЛОБАЛЬНАЯ КОНФИГУРАЦИЯ
 # ==========================================================
-BOT_TOKEN = "8586981878:AAH8w1r9CqLB9QndBjdpSXWc_b9uk_qC3c4"
-ADMIN_IDS = [8449965783]
-DB_PATH = "osint_framework.db"
-DATABASE_FOLDER = Path("database")
-RATE_LIMIT = 10
-CACHE_TTL = 300
+BOT_TOKEN = os.getenv("BOT_TOKEN", "8586981878:AAH8w1r9CqLB9QndBjdpSXWc_b9uk_qC3c4")
+ADMIN_IDS = [int(x) for x in os.getenv("ADMIN_IDS", "8449965783").split(",")]
+ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "MOosa2010")
+DB_PATH = os.getenv("DB_PATH", "osint_framework.db")
+DATABASE_FOLDER = Path(os.getenv("DB_FOLDER", "database"))
+RATE_LIMIT = int(os.getenv("RATE_LIMIT", "100"))
+CACHE_TTL = int(os.getenv("CACHE_TTL", "300"))
+FREE_REQUESTS = int(os.getenv("FREE_REQUESTS", "10"))
+REFERRAL_BONUS = int(os.getenv("REFERRAL_BONUS", "5"))
+MIRROR_BONUS = int(os.getenv("MIRROR_BONUS", "5"))
+PORT = int(os.getenv("PORT", "8080"))
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 
-# 💰 ЦЕНЫ И БОНУСЫ
-FREE_REQUESTS = 10  # Бесплатно при старте
-MIRROR_BONUS = 5    # За создание зеркала
-REFERRAL_BONUS = 5  # За приглашённого друга
-PRICE_PER_REQUEST = 2  # Рублей за запрос (в звёздах ~1 звезда = 1.5₽)
-
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
-logger = logging.getLogger("OSINT")
+logging.basicConfig(
+    level=getattr(logging, LOG_LEVEL, logging.INFO),
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    handlers=[
+        logging.FileHandler("osint_bot.log", encoding="utf-8", mode="a"),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger("OSINT_v15.2")
 
 # ==========================================================
-# 🗄️ БАЗА ДАННЫХ С МОНЕТИЗАЦИЕЙ
+# 📊 СИСТЕМА МЕТРИК И СТАТИСТИКИ
+# ==========================================================
+class SystemMetrics:
+    def __init__(self):
+        self.start_time = datetime.now()
+        self.total_requests = 0
+        self.total_errors = 0
+        self.active_sessions = 0
+        self.cache_hits = 0
+        self.cache_misses = 0
+        self.http_requests = 0
+        self.plugin_stats = defaultdict(int)
+        self.user_activity = defaultdict(list)
+
+    def log_request(self, plugin: str = None, user_id: int = None):
+        self.total_requests += 1
+        if plugin:
+            self.plugin_stats[plugin] += 1
+        if user_id:
+            self.user_activity[user_id].append(datetime.now())
+            if len(self.user_activity[user_id]) > 100:
+                self.user_activity[user_id] = self.user_activity[user_id][-100:]
+
+    def log_error(self, error: str = None):
+        self.total_errors += 1
+        if error:
+            logger.error(f"Error logged: {error}")
+
+    def log_cache_hit(self):
+        self.cache_hits += 1
+
+    def log_cache_miss(self):
+        self.cache_misses += 1
+
+    def log_http(self):
+        self.http_requests += 1
+
+    def get_uptime(self) -> str:
+        delta = datetime.now() - self.start_time
+        days, seconds = delta.days, delta.seconds
+        hours = seconds // 3600
+        minutes = (seconds % 3600) // 60
+        return f"{days}д {hours}ч {minutes}м"
+
+    def get_cache_hit_rate(self) -> float:
+        total = self.cache_hits + self.cache_misses
+        return (self.cache_hits / total * 100) if total > 0 else 0.0
+
+    def get_report(self) -> str:
+        return (f" **СИСТЕМНЫЕ МЕТРИКИ**\n"
+                f"🔹 Аптайм: {self.get_uptime()}\n"
+                f"🔹 Запросов всего: {self.total_requests}\n"
+                f" Ошибок: {self.total_errors}\n"
+                f"🔹 HTTP запросов: {self.http_requests}\n"
+                f" Кэш: {self.cache_hits}/{self.cache_hits + self.cache_misses} "
+                f"({self.get_cache_hit_rate():.1f}%)\n"
+                f"🔹 Активных сессий: {self.active_sessions}\n"
+                f"**Топ плагинов:**\n" +
+                "\n".join(f"• {k}: {v}" for k, v in
+                          sorted(self.plugin_stats.items(), key=lambda x: -x[1])[:5]))
+
+metrics = SystemMetrics()
+
+# ==========================================================
+# 🔐 УТИЛИТЫ БЕЗОПАСНОСТИ
+# ==========================================================
+class SecurityUtils:
+    @staticmethod
+    def hash_password(password: str, salt: str = None) -> Tuple[str, str]:
+        if not salt:
+            salt = secrets.token_hex(16)
+        hashed = hashlib.pbkdf2_hmac('sha256', password.encode(), salt.encode(), 100000)
+        return hashed.hex(), salt
+
+    @staticmethod
+    def verify_password(password: str, hashed: str, salt: str) -> bool:
+        test_hash, _ = SecurityUtils.hash_password(password, salt)
+        return test_hash == hashed
+
+    @staticmethod
+    def validate_email(email: str) -> bool:
+        pattern = r'^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+$'
+        return re.match(pattern, email) is not None
+
+    @staticmethod
+    def validate_phone(phone: str) -> bool:
+        try:
+            p = phonenumbers.parse(phone, None)
+            return phonenumbers.is_valid_number(p)
+        except:
+            return False
+
+    @staticmethod
+    def validate_ip(ip: str) -> bool:
+        pattern = r'^(\d{1,3}\.){3}\d{1,3}$'
+        if not re.match(pattern, ip):
+            return False
+        parts = ip.split('.')
+        return all(0 <= int(part) <= 255 for part in parts)
+
+    @staticmethod
+    def validate_domain(domain: str) -> bool:
+        pattern = r'^[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z]{2,})+$'
+        return re.match(pattern, domain) is not None
+
+    @staticmethod
+    def sanitize_input(text: str, max_length: int = 1000, allowed_chars: str = None) -> str:
+        text = text.strip()[:max_length]
+        text = re.sub(r'[<>{}[\]\\`]', '', text)
+        if allowed_chars:
+            text = ''.join(c for c in text if c in allowed_chars)
+        return text
+
+    @staticmethod
+    def generate_token(length: int = 32) -> str:
+        return secrets.token_urlsafe(length)
+
+# ==========================================================
+# 🗄️ РАСШИРЕННАЯ БАЗА ДАННЫХ
 # ==========================================================
 class BotDatabase:
     def __init__(self, path: str):
         self.path = path
+        self._connection = None
 
     async def init(self):
         async with aiosqlite.connect(self.path) as db:
@@ -60,14 +202,21 @@ class BotDatabase:
                 total_requests INTEGER DEFAULT 0,
                 referral_code TEXT UNIQUE,
                 referred_by INTEGER,
+                is_premium BOOLEAN DEFAULT FALSE,
+                is_banned BOOLEAN DEFAULT FALSE,
+                is_admin BOOLEAN DEFAULT FALSE,
+                premium_expires TEXT,
+                language TEXT DEFAULT 'ru',
                 created_at TEXT DEFAULT CURRENT_TIMESTAMP,
                 last_active TEXT,
-                is_premium BOOLEAN DEFAULT FALSE
+                last_request TEXT
             );
             CREATE TABLE IF NOT EXISTS mirrors (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_id INTEGER,
                 mirror_url TEXT UNIQUE,
+                mirror_code TEXT UNIQUE,
+                uses_count INTEGER DEFAULT 0,
                 created_at TEXT DEFAULT CURRENT_TIMESTAMP,
                 is_active BOOLEAN DEFAULT TRUE,
                 FOREIGN KEY (user_id) REFERENCES users(id)
@@ -77,6 +226,7 @@ class BotDatabase:
                 referrer_id INTEGER,
                 referred_id INTEGER UNIQUE,
                 bonus_given BOOLEAN DEFAULT FALSE,
+                bonus_amount INTEGER DEFAULT 5,
                 created_at TEXT DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (referrer_id) REFERENCES users(id),
                 FOREIGN KEY (referred_id) REFERENCES users(id)
@@ -84,10 +234,11 @@ class BotDatabase:
             CREATE TABLE IF NOT EXISTS transactions (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_id INTEGER,
-                type TEXT,
+                type TEXT CHECK(type IN ('stars_payment', 'manual', 'bonus', 'referral', 'mirror', 'admin_grant')),
                 amount INTEGER,
                 requests_added INTEGER,
-                telegram_payment_id TEXT,
+                payment_id TEXT,
+                status TEXT DEFAULT 'completed',
                 created_at TEXT DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (user_id) REFERENCES users(id)
             );
@@ -97,20 +248,49 @@ class BotDatabase:
                 plugin TEXT,
                 query TEXT,
                 status TEXT,
-                timestamp TEXT DEFAULT CURRENT_TIMESTAMP
+                response_time REAL,
+                error_message TEXT,
+                timestamp TEXT DEFAULT CURRENT_TIMESTAMP,
+                ip_address TEXT,
+                FOREIGN KEY (user_id) REFERENCES users(id)
             );
             CREATE TABLE IF NOT EXISTS cache (
                 key TEXT PRIMARY KEY,
                 value TEXT,
-                expires_at REAL
+                expires_at REAL,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP
             );
-            CREATE TABLE IF NOT EXISTS blacklist (
-                user_id INTEGER PRIMARY KEY,
-                reason TEXT,
+            CREATE TABLE IF NOT EXISTS breaches (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                email TEXT COLLATE NOCASE,
+                password TEXT,
+                source TEXT,
+                breach_date TEXT,
                 added_at TEXT DEFAULT CURRENT_TIMESTAMP
             );
+            CREATE TABLE IF NOT EXISTS settings (
+                key TEXT PRIMARY KEY,
+                value TEXT,
+                updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE INDEX IF NOT EXISTS idx_users_referral ON users(referral_code);
+            CREATE INDEX IF NOT EXISTS idx_users_active ON users(last_active);
+            CREATE INDEX IF NOT EXISTS idx_logs_user ON logs(user_id);
+            CREATE INDEX IF NOT EXISTS idx_logs_timestamp ON logs(timestamp);
+            CREATE INDEX IF NOT EXISTS idx_transactions_user ON transactions(user_id);
+            CREATE INDEX IF NOT EXISTS idx_mirrors_user ON mirrors(user_id);
+            CREATE INDEX IF NOT EXISTS idx_breaches_email ON breaches(email);
+            CREATE INDEX IF NOT EXISTS idx_cache_expires ON cache(expires_at);
             """)
+            await db.execute(
+                "INSERT OR IGNORE INTO users (id, is_admin, requests_left, is_premium, username) VALUES (?, TRUE, 999999, TRUE, ?)",
+                (ADMIN_IDS[0], "admin")
+            )
+            await db.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('maintenance_mode', 'false')")
+            await db.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('welcome_message', 'Добро пожаловать в OSINT Framework!')")
+            await db.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('rate_limit_per_minute', '100')")
             await db.commit()
+        logger.info("️ Database schema initialized successfully")
 
     async def get_user(self, user_id: int) -> Optional[dict]:
         async with aiosqlite.connect(self.path) as db:
@@ -119,144 +299,298 @@ class BotDatabase:
             row = await cursor.fetchone()
             return dict(row) if row else None
 
-    async def create_user(self, user_id: int, username: str, first: str, last: str):
+    async def create_user(self, user_id: int, username: str, first: str, last: str) -> str:
+        referral_code = f"ref_{user_id}_{secrets.token_hex(6)}"
         async with aiosqlite.connect(self.path) as db:
-            referral_code = f"ref_{user_id}_{secrets.token_hex(4)}"
             await db.execute(
                 "INSERT INTO users (id, username, first_name, last_name, referral_code, last_active) VALUES (?, ?, ?, ?, ?, ?)",
-                (user_id, username, first, last, referral_code, datetime.now().isoformat()))
+                (user_id, username, first, last, referral_code, datetime.now().isoformat())
+            )
             await db.commit()
+        return referral_code
 
-    async def update_user(self, user_id: int, **kwargs):
+    async def update_user(self, user_id: int, **kwargs) -> bool:
+        if not kwargs:
+            return False
         async with aiosqlite.connect(self.path) as db:
             fields = ", ".join(f"{k} = ?" for k in kwargs.keys())
             values = list(kwargs.values()) + [user_id]
             await db.execute(f"UPDATE users SET {fields} WHERE id = ?", values)
             await db.commit()
+        return True
 
-    async def add_requests(self, user_id: int, amount: int):
+    async def use_request(self, user_id: int) -> Tuple[bool, str]:
+        user = await self.get_user(user_id)
+        if not user:
+            return False, "Пользователь не найден"
+        if user.get('is_banned'):
+            return False, "Ваш аккаунт заблокирован"
+        if user.get('is_admin') or user.get('is_premium'):
+            return True, "Unlimited"
+        if user['requests_left'] > 0:
+            await self.update_user(
+                user_id,
+                requests_left=user['requests_left'] - 1,
+                last_request=datetime.now().isoformat()
+            )
+            return True, "OK"
+        return False, "Недостаточно запросов"
+
+    async def add_requests(self, user_id: int, amount: int, reason: str = "bonus") -> bool:
         async with aiosqlite.connect(self.path) as db:
             await db.execute(
                 "UPDATE users SET requests_left = requests_left + ?, total_requests = total_requests + ? WHERE id = ?",
-                (amount, amount, user_id))
+                (amount, amount, user_id)
+            )
             await db.commit()
+            await self.log_transaction(user_id, reason, 0, amount, f"bonus_{reason}")
+        return True
 
-    async def use_request(self, user_id: int) -> bool:
+    async def get_all_users(self, limit: int = 50, offset: int = 0) -> List[dict]:
         async with aiosqlite.connect(self.path) as db:
-            cursor = await db.execute("SELECT requests_left FROM users WHERE id = ?", (user_id,))
-            row = await cursor.fetchone()
-            if row and row[0] > 0:
-                await db.execute("UPDATE users SET requests_left = requests_left - 1 WHERE id = ?", (user_id,))
-                await db.commit()
-                return True
-            return False
-
-    async def get_referral_code(self, user_id: int) -> Optional[str]:
-        async with aiosqlite.connect(self.path) as db:
-            cursor = await db.execute("SELECT referral_code FROM users WHERE id = ?", (user_id,))
-            row = await cursor.fetchone()
-            return row[0] if row else None
-
-    async def process_referral(self, new_user_id: int, referrer_id: int) -> bool:
-        """Обработка реферала. Возвращает True если бонус начислен."""
-        if new_user_id == referrer_id:
-            return False
-        
-        async with aiosqlite.connect(self.path) as db:
-            # Проверяем не был ли уже реферал
-            cursor = await db.execute("SELECT id FROM referrals WHERE referred_id = ?", (new_user_id,))
-            if await cursor.fetchone():
-                return False
-            
-            # Добавляем реферала
-            await db.execute(
-                "INSERT INTO referrals (referrer_id, referred_id) VALUES (?, ?)",
-                (referrer_id, new_user_id))
-            
-            # Начисляем бонус рефереру
-            await db.execute(
-                "UPDATE users SET requests_left = requests_left + ? WHERE id = ?",
-                (REFERRAL_BONUS, referrer_id))
-            
-            # Привязываем нового пользователя к рефереру
-            await db.execute(
-                "UPDATE users SET referred_by = ? WHERE id = ?",
-                (referrer_id, new_user_id))
-            
-            await db.commit()
-            return True
-
-    async def create_mirror(self, user_id: int) -> str:
-        """Создаёт зеркало (реферальную ссылку). Возвращает URL."""
-        mirror_code = secrets.token_urlsafe(8)
-        mirror_url = f"https://t.me/{(await self.get_bot_username())}?start=mirror_{mirror_code}"
-        
-        async with aiosqlite.connect(self.path) as db:
-            await db.execute(
-                "INSERT INTO mirrors (user_id, mirror_url) VALUES (?, ?)",
-                (user_id, mirror_url))
-            await db.execute(
-                "UPDATE users SET requests_left = requests_left + ? WHERE id = ?",
-                (MIRROR_BONUS, user_id))
-            await db.commit()
-        
-        return mirror_url
-
-    async def process_mirror_activation(self, user_id: int, mirror_code: str):
-        """Активация зеркала. Начисляет бонус создателю зеркала."""
-        async with aiosqlite.connect(self.path) as db:
+            db.row_factory = aiosqlite.Row
             cursor = await db.execute(
-                "SELECT user_id FROM mirrors WHERE mirror_url LIKE ? AND is_active = TRUE",
-                (f"%{mirror_code}%",))
+                "SELECT * FROM users ORDER BY created_at DESC LIMIT ? OFFSET ?",
+                (limit, offset)
+            )
+            return [dict(row) for row in await cursor.fetchall()]
+
+    async def get_user_count(self) -> int:
+        async with aiosqlite.connect(self.path) as db:
+            cursor = await db.execute("SELECT COUNT(*) FROM users")
             row = await cursor.fetchone()
-            if row:
-                creator_id = row[0]
-                if creator_id != user_id:  # Не самому себе
-                    await db.execute(
-                        "UPDATE users SET requests_left = requests_left + ? WHERE id = ?",
-                        (MIRROR_BONUS, creator_id))
-                    await db.commit()
+            return row[0] if row else 0
 
-    async def log_transaction(self, user_id: int, type_: str, amount: int, requests: int, payment_id: str):
+    async def get_stats(self) -> dict:
         async with aiosqlite.connect(self.path) as db:
-            await db.execute(
-                "INSERT INTO transactions (user_id, type, amount, requests_added, telegram_payment_id) VALUES (?, ?, ?, ?, ?)",
-                (user_id, type_, amount, requests, payment_id))
-            await db.commit()
+            total_users = (await (await db.execute("SELECT COUNT(*) FROM users")).fetchone())[0]
+            active_users = (await (await db.execute(
+                "SELECT COUNT(*) FROM users WHERE last_active > ?",
+                ((datetime.now() - timedelta(hours=24)).isoformat(),)
+            )).fetchone())[0]
+            total_requests = (await (await db.execute("SELECT COALESCE(SUM(total_requests), 0) FROM users")).fetchone())[0]
+            today_requests = (await (await db.execute(
+                "SELECT COUNT(*) FROM logs WHERE timestamp > ?",
+                (datetime.now().date().isoformat(),)
+            )).fetchone())[0]
+            banned_users = (await (await db.execute("SELECT COUNT(*) FROM users WHERE is_banned = TRUE")).fetchone())[0]
+            premium_users = (await (await db.execute("SELECT COUNT(*) FROM users WHERE is_premium = TRUE")).fetchone())[0]
+            breaches = (await (await db.execute("SELECT COUNT(*) FROM breaches")).fetchone())[0]
+            total_income = (await (await db.execute(
+                "SELECT COALESCE(SUM(amount), 0) FROM transactions WHERE type = 'stars_payment'"
+            )).fetchone())[0]
+            return {
+                "total_users": total_users, "active_24h": active_users,
+                "total_requests": total_requests, "today_requests": today_requests,
+                "banned_users": banned_users, "premium_users": premium_users,
+                "breaches_count": breaches, "total_income": total_income,
+                "uptime": metrics.get_uptime(),
+                "cache_hit_rate": f"{metrics.cache_hits}/{metrics.cache_hits + metrics.cache_misses}"
+            }
 
-    async def log(self, user_id: int, plugin: str, query: str, status: str = "ok"):
-        async with aiosqlite.connect(self.path) as db:
-            await db.execute("INSERT INTO logs (user_id, plugin, query, status) VALUES (?, ?, ?, ?)",
-                             (user_id, plugin, query, status))
-            await db.commit()
+    async def ban_user(self, user_id: int, reason: str = "Нарушение правил") -> bool:
+        success = await self.update_user(user_id, is_banned=True)
+        if success:
+            logger.warning(f"🚫 User {user_id} banned: {reason}")
+        return success
 
-    async def is_blacklisted(self, user_id: int) -> bool:
+    async def unban_user(self, user_id: int) -> bool:
+        success = await self.update_user(user_id, is_banned=False)
+        if success:
+            logger.info(f"✅ User {user_id} unbanned")
+        return success
+
+    async def is_banned(self, user_id: int) -> bool:
+        user = await self.get_user(user_id)
+        return user.get('is_banned', False) if user else False
+
+    async def log(self, user_id: int, plugin: str, query: str, status: str = "ok",
+                  response_time: float = 0, error_message: str = None) -> bool:
+        try:
+            async with aiosqlite.connect(self.path) as db:
+                await db.execute(
+                    "INSERT INTO logs (user_id, plugin, query, status, response_time, error_message) VALUES (?, ?, ?, ?, ?, ?)",
+                    (user_id, plugin, query, status, response_time, error_message)
+                )
+                await db.commit()
+            return True
+        except Exception as e:
+            logger.error(f"Failed to log: {e}")
+            return False
+
+    async def get_user_logs(self, user_id: int, limit: int = 50) -> List[dict]:
         async with aiosqlite.connect(self.path) as db:
-            cursor = await db.execute("SELECT 1 FROM blacklist WHERE user_id = ?", (user_id,))
-            return await cursor.fetchone() is not None
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(
+                "SELECT * FROM logs WHERE user_id = ? ORDER BY timestamp DESC LIMIT ?",
+                (user_id, limit)
+            )
+            return [dict(row) for row in await cursor.fetchall()]
+
+    async def log_transaction(self, user_id: int, type_: str, amount: int,
+                              requests: int, payment_id: str) -> bool:
+        try:
+            async with aiosqlite.connect(self.path) as db:
+                await db.execute(
+                    "INSERT INTO transactions (user_id, type, amount, requests_added, payment_id) VALUES (?, ?, ?, ?, ?)",
+                    (user_id, type_, amount, requests, payment_id)
+                )
+                await db.commit()
+            return True
+        except Exception as e:
+            logger.error(f"Failed to log transaction: {e}")
+            return False
 
     async def get_cache(self, key: str) -> Optional[str]:
         async with aiosqlite.connect(self.path) as db:
-            cursor = await db.execute("SELECT value FROM cache WHERE key = ? AND expires_at > ?",
-                                      (key, time.time()))
+            cursor = await db.execute(
+                "SELECT value FROM cache WHERE key = ? AND expires_at > ?",
+                (key, time.time())
+            )
+            row = await cursor.fetchone()
+            if row:
+                metrics.log_cache_hit()
+                return row[0]
+            metrics.log_cache_miss()
+            return None
+
+    async def set_cache(self, key: str, value: str, ttl: int = CACHE_TTL) -> bool:
+        try:
+            async with aiosqlite.connect(self.path) as db:
+                await db.execute(
+                    "INSERT OR REPLACE INTO cache (key, value, expires_at) VALUES (?, ?, ?)",
+                    (key, value, time.time() + ttl)
+                )
+                await db.commit()
+            return True
+        except Exception as e:
+            logger.error(f"Cache set error: {e}")
+            return False
+
+    async def clear_expired_cache(self) -> int:
+        async with aiosqlite.connect(self.path) as db:
+            cursor = await db.execute("DELETE FROM cache WHERE expires_at <= ?", (time.time(),))
+            await db.commit()
+            return cursor.rowcount
+
+    async def search_breaches(self, email: str) -> List[dict]:
+        async with aiosqlite.connect(self.path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(
+                "SELECT email, password, source, breach_date FROM breaches WHERE email = ? LIMIT 50",
+                (email.lower(),)
+            )
+            return [dict(row) for row in await cursor.fetchall()]
+
+    async def add_breach(self, email: str, password: str, source: str, date: str = None) -> bool:
+        if not date:
+            date = datetime.now().isoformat()
+        try:
+            async with aiosqlite.connect(self.path) as db:
+                await db.execute(
+                    "INSERT INTO breaches (email, password, source, breach_date) VALUES (?, ?, ?, ?)",
+                    (email.lower(), password, source, date)
+                )
+                await db.commit()
+            return True
+        except Exception as e:
+            logger.error(f"Failed to add breach: {e}")
+            return False
+
+    async def create_mirror(self, user_id: int) -> str:
+        mirror_code = secrets.token_urlsafe(10)
+        mirror_url = f"https://t.me/osint_bot?start=mirror_{mirror_code}"
+        async with aiosqlite.connect(self.path) as db:
+            await db.execute(
+                "INSERT INTO mirrors (user_id, mirror_url, mirror_code) VALUES (?, ?, ?)",
+                (user_id, mirror_url, mirror_code)
+            )
+            await db.execute(
+                "UPDATE users SET requests_left = requests_left + ? WHERE id = ?",
+                (MIRROR_BONUS, user_id)
+            )
+            await db.commit()
+        return mirror_url
+
+    async def activate_mirror(self, user_id: int, mirror_code: str) -> Optional[int]:
+        async with aiosqlite.connect(self.path) as db:
+            cursor = await db.execute(
+                "SELECT id, user_id FROM mirrors WHERE mirror_code = ? AND is_active = TRUE",
+                (mirror_code,)
+            )
+            row = await cursor.fetchone()
+            if not row:
+                return None
+            mirror_id, creator_id = row
+            if creator_id == user_id:
+                return None
+            cursor = await db.execute(
+                "SELECT id FROM referrals WHERE referred_id = ? AND referrer_id = ?",
+                (user_id, creator_id)
+            )
+            if await cursor.fetchone():
+                return None
+            await db.execute(
+                "UPDATE users SET requests_left = requests_left + ? WHERE id = ?",
+                (MIRROR_BONUS, creator_id)
+            )
+            await db.execute(
+                "UPDATE mirrors SET uses_count = uses_count + 1 WHERE id = ?",
+                (mirror_id,)
+            )
+            await db.execute(
+                "INSERT INTO referrals (referrer_id, referred_id, bonus_amount) VALUES (?, ?, ?)",
+                (creator_id, user_id, MIRROR_BONUS)
+            )
+            await db.commit()
+        return creator_id
+
+    async def process_referral(self, new_user_id: int, referrer_id: int) -> bool:
+        if new_user_id == referrer_id:
+            return False
+        async with aiosqlite.connect(self.path) as db:
+            cursor = await db.execute(
+                "SELECT id FROM referrals WHERE referred_id = ?",
+                (new_user_id,)
+            )
+            if await cursor.fetchone():
+                return False
+            await db.execute(
+                "INSERT INTO referrals (referrer_id, referred_id, bonus_amount) VALUES (?, ?, ?)",
+                (referrer_id, new_user_id, REFERRAL_BONUS)
+            )
+            await db.execute(
+                "UPDATE users SET requests_left = requests_left + ? WHERE id = ?",
+                (REFERRAL_BONUS, referrer_id)
+            )
+            await db.execute(
+                "UPDATE users SET referred_by = ? WHERE id = ?",
+                (referrer_id, new_user_id)
+            )
+            await db.commit()
+        return True
+
+    async def get_setting(self, key: str) -> Optional[str]:
+        async with aiosqlite.connect(self.path) as db:
+            cursor = await db.execute("SELECT value FROM settings WHERE key = ?", (key,))
             row = await cursor.fetchone()
             return row[0] if row else None
 
-    async def set_cache(self, key: str, value: str, ttl: int = CACHE_TTL):
-        async with aiosqlite.connect(self.path) as db:
-            await db.execute("INSERT OR REPLACE INTO cache (key, value, expires_at) VALUES (?, ?, ?)",
-                             (key, value, time.time() + ttl))
-            await db.commit()
-
-    async def get_bot_username(self) -> str:
-        """Получает username бота"""
-        async with aiosqlite.connect(self.path) as db:
-            cursor = await db.execute("SELECT username FROM users WHERE id = ? LIMIT 1", (ADMIN_IDS[0],))
-            row = await cursor.fetchone()
-            return row[0] if row else "osint_bot"
+    async def set_setting(self, key: str, value: str) -> bool:
+        try:
+            async with aiosqlite.connect(self.path) as db:
+                await db.execute(
+                    "INSERT OR REPLACE INTO settings (key, value, updated_at) VALUES (?, ?, ?)",
+                    (key, value, datetime.now().isoformat())
+                )
+                await db.commit()
+            return True
+        except Exception as e:
+            logger.error(f"Failed to set setting: {e}")
+            return False
 
 # ==========================================================
-# 🗃️ СИСТЕМА БАЗ УТЕЧЕК (без изменений)
+# 🗃️ БАЗА УТЕЧЕК (ЛОКАЛЬНАЯ)
 # ==========================================================
 class BreachDatabase:
     def __init__(self, db_folder: Path):
@@ -271,7 +605,7 @@ class BreachDatabase:
             await db.execute("""
             CREATE TABLE IF NOT EXISTS breaches (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                email TEXT,
+                email TEXT NOT NULL COLLATE NOCASE,
                 password TEXT,
                 source TEXT,
                 breach_date TEXT,
@@ -284,7 +618,7 @@ class BreachDatabase:
             await db.execute("""
             CREATE TABLE IF NOT EXISTS phones (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                phone TEXT,
+                phone TEXT NOT NULL,
                 name TEXT,
                 address TEXT,
                 source TEXT,
@@ -293,28 +627,22 @@ class BreachDatabase:
             """)
             await db.execute("CREATE INDEX IF NOT EXISTS idx_phone ON phones(phone)")
             await db.commit()
-        logger.info(f"🕸️ Database folder: {self.db_folder.absolute()}")
+        logger.info(f"🕸️ Breach Database initialized: {self.db_folder.absolute()}")
 
     async def search_email(self, email: str) -> List[dict]:
         results = []
+        email = email.lower().strip()
         try:
             async with aiosqlite.connect(self.breach_db) as db:
                 db.row_factory = aiosqlite.Row
                 cursor = await db.execute(
-                    "SELECT email, password, source, breach_date FROM breaches WHERE email = ? LIMIT 50",
-                    (email.lower(),))
+                    "SELECT email, password, source, breach_date FROM breaches WHERE email = ? LIMIT 100",
+                    (email,)
+                )
                 for row in await cursor.fetchall():
-                    results.append(dict(row))
+                    results.append({"email": row["email"], "password": row["password"], "source": row["source"], "date": row["breach_date"]})
         except Exception as e:
-            logger.error(f"DB error: {e}")
-        if self.combo_json.exists():
-            try:
-                with open(self.combo_json, 'r', encoding='utf-8') as f:
-                    for entry in json.load(f):
-                        if entry.get("email", "").lower() == email.lower():
-                            results.append(entry)
-            except Exception as e:
-                logger.error(f"JSON error: {e}")
+            logger.error(f"Breach DB error: {e}")
         return results
 
     async def search_phone(self, phone: str) -> List[dict]:
@@ -324,63 +652,78 @@ class BreachDatabase:
             async with aiosqlite.connect(self.phone_db) as db:
                 db.row_factory = aiosqlite.Row
                 cursor = await db.execute(
-                    "SELECT phone, name, address, source FROM phones WHERE phone LIKE ? OR phone LIKE ? LIMIT 20",
-                    (f"%{phone_clean[-10:]}%", f"%{phone}%"))
+                    "SELECT phone, name, address, source FROM phones WHERE phone LIKE ? OR phone LIKE ? LIMIT 50",
+                    (f"%{phone_clean}%", f"%{phone}%")
+                )
                 for row in await cursor.fetchall():
-                    results.append(dict(row))
+                    results.append({"phone": row["phone"], "name": row["name"], "address": row["address"], "source": row["source"]})
         except Exception as e:
             logger.error(f"Phone DB error: {e}")
         return results
 
     async def get_stats(self) -> dict:
-        stats = {"breaches": 0, "phones": 0, "combos": 0}
+        stats = {"breaches": 0, "phones": 0, "emails": 0}
         try:
             async with aiosqlite.connect(self.breach_db) as db:
-                c = await db.execute("SELECT COUNT(*) FROM breaches")
-                stats["breaches"] = (await c.fetchone())[0]
+                stats["breaches"] = (await (await db.execute("SELECT COUNT(*) FROM breaches")).fetchone())[0]
+                stats["emails"] = (await (await db.execute("SELECT COUNT(DISTINCT email) FROM breaches")).fetchone())[0]
         except: pass
         try:
             async with aiosqlite.connect(self.phone_db) as db:
-                c = await db.execute("SELECT COUNT(*) FROM phones")
-                stats["phones"] = (await c.fetchone())[0]
+                stats["phones"] = (await (await db.execute("SELECT COUNT(*) FROM phones")).fetchone())[0]
         except: pass
-        if self.combo_json.exists():
-            try:
-                with open(self.combo_json, 'r') as f:
-                    stats["combos"] = len(json.load(f))
-            except: pass
         return stats
 
 # ==========================================================
-# 🌐 HTTP КЛИЕНТ (без изменений)
+# 🌐 HTTP КЛИЕНТ С ПОВТОРНЫМИ ПОПЫТКАМИ
 # ==========================================================
 class AsyncHTTP:
     def __init__(self):
         self._session: Optional[aiohttp.ClientSession] = None
+        self._lock = asyncio.Lock()
+        self.request_count = 0
 
     async def get_session(self) -> aiohttp.ClientSession:
-        if self._session is None or self._session.closed:
-            self._session = aiohttp.ClientSession(
-                timeout=aiohttp.ClientTimeout(total=10),
-                headers={"User-Agent": "Mozilla/5.0", "Accept": "application/json"})
-        return self._session
+        async with self._lock:
+            if self._session is None or self._session.closed:
+                self._session = aiohttp.ClientSession(
+                    timeout=aiohttp.ClientTimeout(total=12),
+                    headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"},
+                    connector=aiohttp.TCPConnector(limit=20, ttl_dns_cache=300, force_close=True)
+                )
+            return self._session
 
-    async def get_json(self, url: str, headers: dict = None) -> dict:
-        s = await self.get_session()
-        async with s.get(url, headers=headers) as r:
-            r.raise_for_status()
-            return await r.json()
+    async def get_json(self, url: str, headers: dict = None, retries: int = 3) -> dict:
+        session = await self.get_session()
+        for attempt in range(retries):
+            try:
+                metrics.log_http()
+                async with session.get(url, headers=headers) as r:
+                    r.raise_for_status()
+                    return await r.json()
+            except Exception:
+                if attempt == retries - 1: return {}
+                await asyncio.sleep(1.5 ** attempt)
+        return {}
 
-    async def get_text(self, url: str, headers: dict = None) -> str:
-        s = await self.get_session()
-        async with s.get(url, headers=headers) as r:
-            r.raise_for_status()
-            return await r.text()
+    async def get_text(self, url: str, headers: dict = None, retries: int = 3) -> str:
+        session = await self.get_session()
+        for attempt in range(retries):
+            try:
+                metrics.log_http()
+                async with session.get(url, headers=headers) as r:
+                    r.raise_for_status()
+                    return await r.text()
+            except Exception:
+                if attempt == retries - 1: return ""
+                await asyncio.sleep(1.5 ** attempt)
+        return ""
 
-    async def head(self, url: str) -> int:
-        s = await self.get_session()
+    async def head(self, url: str, timeout: int = 4) -> int:
+        session = await self.get_session()
         try:
-            async with s.head(url, allow_redirects=True, timeout=aiohttp.ClientTimeout(total=4)) as r:
+            metrics.log_http()
+            async with session.head(url, allow_redirects=True, timeout=aiohttp.ClientTimeout(total=timeout)) as r:
                 return r.status
         except:
             return 0
@@ -390,57 +733,63 @@ class AsyncHTTP:
             await self._session.close()
 
 # ==========================================================
-# ⏱️ RATE LIMITER (без изменений)
+# ⏱️ RATE LIMITER
 # ==========================================================
 class RateLimiter:
     def __init__(self, max_req: int, window: int = 60):
-        self.max, self.window, self.reqs = max_req, window, {}
+        self.max = max_req
+        self.window = window
+        self.reqs = defaultdict(list)
+        self.hourly = defaultdict(int)
+        self.daily = defaultdict(int)
 
-    def allow(self, uid: int) -> bool:
+    def allow(self, uid: int, action: str = "default") -> Tuple[bool, str]:
         now = time.time()
-        self.reqs.setdefault(uid, [])
         self.reqs[uid] = [t for t in self.reqs[uid] if now - t < self.window]
         if len(self.reqs[uid]) >= self.max:
-            return False
+            return False, f"Лимит: {self.max}/{self.window}сек"
+        hour_key = int(now // 3600)
+        if self.hourly[(uid, hour_key)] >= self.max * 10:
+            return False, "Часовой лимит превышен"
+        day_key = int(now // 86400)
+        if self.daily[(uid, day_key)] >= self.max * 100:
+            return False, "Дневной лимит превышен"
         self.reqs[uid].append(now)
-        return True
+        self.hourly[(uid, hour_key)] += 1
+        self.daily[(uid, day_key)] += 1
+        return True, "OK"
 
-    def remaining(self, uid: int) -> int:
+    def get_stats(self, uid: int) -> dict:
         now = time.time()
-        valid = [t for t in self.reqs.get(uid, []) if now - t < self.window]
-        return max(0, self.max - len(valid))
+        minute_valid = len([t for t in self.reqs.get(uid, []) if now - t < self.window])
+        hour_key = int(now // 3600)
+        day_key = int(now // 86400)
+        return {
+            "minute": f"{minute_valid}/{self.max}",
+            "hourly": f"{self.hourly[(uid, hour_key)]}/{self.max * 10}",
+            "daily": f"{self.daily[(uid, day_key)]}/{self.max * 100}"
+        }
 
 # ==========================================================
-# 🎮 DISCORD UTILS (без изменений)
+#  DISCORD UTILS
 # ==========================================================
 class DiscordUtils:
     EPOCH = 1420070400000
-
     @staticmethod
-    def decode_snowflake(sid: int) -> dict:
+    def decode_snowflake(sid: int) -> Optional[dict]:
         try:
             ts = ((sid >> 22) + DiscordUtils.EPOCH) / 1000
             created = datetime.fromtimestamp(ts)
-            return {
-                "created_at": created.strftime("%Y-%m-%d %H:%M:%S UTC"),
-                "age_days": (datetime.now() - created).days,
-                "internal_id": sid & 0xFFFFFF,
-                "process_id": (sid >> 17) & 0x1F,
-                "worker_id": (sid >> 22) & 0x1F,
-                "unix_ts": int(ts)
-            }
-        except:
-            return None
+            return {"created_at": created.strftime("%Y-%m-%d %H:%M:%S UTC"), "age_days": (datetime.now() - created).days, "snowflake": str(sid)}
+        except: return None
 
     @staticmethod
-    def avatar_url(uid: int, hsh: str = None, bot: bool = False) -> str:
-        if hsh:
-            ext = "gif" if hsh.startswith("a_") else "png"
-            return f"https://cdn.discordapp.com/avatars/{uid}/{hsh}.{ext}"
-        return f"https://cdn.discordapp.com/embed/avatars/{0 if bot else uid % 5}.png"
+    def avatar_url(uid: int, hsh: str = None) -> str:
+        if hsh: return f"https://cdn.discordapp.com/avatars/{uid}/{hsh}.png"
+        return f"https://cdn.discordapp.com/embed/avatars/{uid % 5}.png"
 
 # ==========================================================
-# 🕵️ OSINT FRAMEWORK
+# ️ OSINT FRAMEWORK (ЯДРО)
 # ==========================================================
 class OSINTFramework:
     def __init__(self):
@@ -449,716 +798,584 @@ class OSINTFramework:
         self.http = AsyncHTTP()
         self.limiter = RateLimiter(RATE_LIMIT)
         self.discord = DiscordUtils()
-        self.plugins = {}
+        self.security = SecurityUtils()
+        self.plugins: Dict[str, Callable] = {}
+        self.start_time = datetime.now()
 
     async def init(self):
         await self.db.init()
         await self.breach_db.init()
-        self.register_plugins()
-        logger.info("🕸️ Framework initialized")
+        self._register_plugins()
+        logger.info("🕸️ OSINT Framework v15.2 ENTERPRISE initialized")
 
-    def register_plugins(self):
-        self.plugins.update({
-            "ip": self.plugin_ip,
-            "dns": self.plugin_dns,
-            "whois": self.plugin_whois,
-            "subs": self.plugin_subs,
-            "nick": self.plugin_nick,
-            "phone": self.plugin_phone,
-            "email": self.plugin_email,
-            "breach": self.plugin_breach,
-            "ton": self.plugin_ton,
-            "tg_id": self.plugin_tg_id,
-            "geo": self.plugin_geo,
-            "discord": self.plugin_discord
-        })
-        logger.info(f"🕸️ Registered {len(self.plugins)} plugins")
+    def _register_plugins(self):
+        self.plugins = {
+            "ip": self.plugin_ip, "dns": self.plugin_dns, "whois": self.plugin_whois,
+            "subs": self.plugin_subs, "nick": self.plugin_nick, "phone": self.plugin_phone,
+            "email": self.plugin_email, "breach": self.plugin_breach, "ton": self.plugin_ton,
+            "tg_id": self.plugin_tg_id, "geo": self.plugin_geo, "discord": self.plugin_discord,
+            "exif": self.plugin_exif
+        }
 
-    # ─────────── ПЛАГИНЫ (те же что были) ───────────
     async def plugin_ip(self, query: str) -> str:
-        if not re.match(r"^(\d{1,3}\.){3}\d{1,3}$", query):
-            return "🕸️ Неверный формат IPv4"
-        cached = await self.db.get_cache(f"ip:{query}")
-        if cached:
-            return cached
-        data = await self.http.get_json(f"http://ip-api.com/json/{query}?fields=4194303")
-        if data.get("status") == "fail":
-            return f"🕸️ {data.get('message', 'Ошибка')}"
-        lat = data.get('lat', 0)
-        lon = data.get('lon', 0)
-        google_maps = f"https://www.google.com/maps?q={lat},{lon}"
-        res = (f"🕸️ **IP:** `{data['query']}`\n"
-               f"🕸️ **Страна:** {data.get('country')} ({data.get('countryCode')})\n"
-               f"🕸️ **Регион:** {data.get('regionName')}\n"
-               f"🕸️ **Город:** {data.get('city')}\n"
-               f"🕸️ **Индекс:** {data.get('zip', 'N/A')}\n"
-               f"🕸️ **Координаты:** `{lat}, {lon}`\n"
-               f"🕸️ **Карта:** [Google Maps]({google_maps})\n"
-               f"🕸️ **TZ:** {data.get('timezone')}\n"
-               f"🕸️ **ISP:** `{data.get('isp')}`\n"
-               f"🕸️ **Org:** `{data.get('org')}`\n"
-               f"🕸️ **AS:** `{data.get('as')}`\n"
-               f"🕸️ **Детекция:** Мобильный: {'🕸️' if data.get('mobile') else '❌'} | "
-               f"Proxy/VPN: {'🕸️' if data.get('proxy') else '❌'} | "
-               f"Хостинг: {'🕸️' if data.get('hosting') else '❌'}")
-        await self.db.set_cache(f"ip:{query}", res)
-        return res
+        start_time = time.time()
+        try:
+            if not self.security.validate_ip(query):
+                return "🕸️ Неверный формат IPv4. Пример: 8.8.8.8"
+            cached = await self.db.get_cache(f"ip:{query}")
+            if cached: return cached
+            metrics.log_request("ip")
+            data = await self.http.get_json(f"http://ip-api.com/json/{query}?fields=4194303")
+            if data.get("status") == "fail": return f"🕸️ Ошибка API: {data.get('message', 'Unknown')}"
+            lat, lon = data.get('lat', 0), data.get('lon', 0)
+            res = (f"🕸️ **IP:** `{data['query']}`\n"
+                   f"🕸️ **Страна:** {data.get('country')} ({data.get('countryCode')})\n"
+                   f"🕸️ **Регион:** {data.get('regionName')}\n"
+                   f"🕸️ **Город:** {data.get('city')}\n"
+                   f"🕸️ **Координаты:** `{lat}, {lon}`\n"
+                   f"🕸️ **ISP:** `{data.get('isp')}`\n"
+                   f"🕸️ **Proxy/VPN:** {'✅' if data.get('proxy') else '❌'}")
+            await self.db.set_cache(f"ip:{query}", res, 3600)
+            await self.db.log(0, "ip", query, "ok", time.time() - start_time)
+            return res
+        except Exception as e:
+            return f"🕸️ Ошибка: {str(e)}"
 
     async def plugin_dns(self, query: str) -> str:
-        cached = await self.db.get_cache(f"dns:{query}")
-        if cached:
-            return cached
-        data = await self.http.get_json(f"https://dns.google/resolve?name={query}&type=A")
-        answers = data.get("Answer", [])
-        if not answers:
-            return f"🕸️ DNS записи для `{query}` не найдены"
-        res = f"🕸️ **DNS для `{query}`:**\n"
-        for a in answers[:15]:
-            res += f"🕸️ `{a['data']}` (TTL: {a['TTL']})\n"
-        await self.db.set_cache(f"dns:{query}", res)
-        return res
+        try:
+            cached = await self.db.get_cache(f"dns:{query}")
+            if cached: return cached
+            metrics.log_request("dns")
+            data = await self.http.get_json(f"https://dns.google/resolve?name={query}&type=A")
+            answers = data.get("Answer", [])
+            if not answers: return f"🕸️ DNS записи для `{query}` не найдены"
+            res = f"️ **DNS для `{query}`:**\n" + "\n".join(f"🕸️ `{a['data']}` (TTL: {a['TTL']})" for a in answers[:20])
+            await self.db.set_cache(f"dns:{query}", res, 1800)
+            return res
+        except Exception as e:
+            return f"🕸️ Ошибка DNS: {str(e)}"
 
     async def plugin_whois(self, query: str) -> str:
-        cached = await self.db.get_cache(f"whois:{query}")
-        if cached:
-            return cached
-        text = await self.http.get_text(f"https://api.hackertarget.com/whois/?q={query}")
-        if "error" in text.lower() or len(text) < 100:
-            return "🕸️ WHOIS скрыт или домен не найден"
-        res = f"🕸️ **WHOIS `{query}`:**\n```{text[:3500]}```" if len(text) > 3500 else f"🕸️ **WHOIS `{query}`:**\n```{text}```"
-        await self.db.set_cache(f"whois:{query}", res, 86400)
-        return res
+        try:
+            cached = await self.db.get_cache(f"whois:{query}")
+            if cached: return cached
+            metrics.log_request("whois")
+            text = await self.http.get_text(f"https://api.hackertarget.com/whois/?q={query}")
+            if "error" in text.lower() or len(text) < 100: return "🕸️ WHOIS скрыт или домен не найден"
+            res = f"️ **WHOIS `{query}`:**\n```{text[:3500]}```"
+            await self.db.set_cache(f"whois:{query}", res, 86400)
+            return res
+        except Exception as e:
+            return f"🕸️ Ошибка WHOIS: {str(e)}"
 
     async def plugin_subs(self, query: str) -> str:
-        cached = await self.db.get_cache(f"subs:{query}")
-        if cached:
-            return cached
         try:
+            cached = await self.db.get_cache(f"subs:{query}")
+            if cached: return cached
+            metrics.log_request("subs")
             data = await self.http.get_json(f"https://crt.sh/?q={query}&output=json")
             subs = {s.strip() for e in data for s in e.get("name_value", "").split("\n") if s.strip() and "*" not in s}
-            if not subs:
-                return f"🕸️ Субдомены для `{query}` не найдены"
-            res = f"🕸️ **Субдомены `{query}` (Top 30):**\n" + "\n".join(f"🕸️ `{s}`" for s in sorted(subs)[:30])
-            if len(subs) > 30:
-                res += f"\n... и ещё {len(subs)-30}"
+            if not subs: return f"🕸️ Субдомены для `{query}` не найдены"
+            res = f"🕸️ **Субдомены `{query}` (Top 50):**\n" + "\n".join(f"🕸️ `{s}`" for s in sorted(subs)[:50])
             await self.db.set_cache(f"subs:{query}", res, 43200)
             return res
         except Exception as e:
-            return f"🕸️ Ошибка: {e}"
+            return f"🕸️ Ошибка: {str(e)}"
 
     async def plugin_nick(self, query: str) -> str:
+        """Исправленный поиск по нику с защитой от блокировок"""
+        start_time = time.time()
+        metrics.log_request("nick")
+        query = query.strip().lower()
+        if not query or len(query) < 2:
+            return "🕸️ Введите корректный никнейм (минимум 2 символа)"
+
         platforms = {
             "VK": f"https://vk.com/{query}", "Telegram": f"https://t.me/{query}",
             "Instagram": f"https://instagram.com/{query}", "Twitter/X": f"https://twitter.com/{query}",
             "TikTok": f"https://tiktok.com/@{query}", "Reddit": f"https://reddit.com/user/{query}",
             "YouTube": f"https://youtube.com/@{query}", "Twitch": f"https://twitch.tv/{query}",
-            "GitHub": f"https://github.com/{query}", "GitLab": f"https://gitlab.com/{query}",
-            "Steam": f"https://steamcommunity.com/id/{query}", "SoundCloud": f"https://soundcloud.com/{query}",
-            "LinkedIn": f"https://linkedin.com/in/{query}", "Pinterest": f"https://pinterest.com/{query}",
-            "Spotify": f"https://open.spotify.com/user/{query}", "Discord": f"https://discord.com/users/{query}",
-            "Minecraft": f"https://namemc.com/profile/{query}", "Roblox": f"https://roblox.com/user.aspx?username={query}",
-            "Pastebin": f"https://pastebin.com/u/{query}", "LastFM": f"https://last.fm/user/{query}",
-            "Threads": f"https://threads.net/@{query}", "Mastodon": f"https://mastodon.social/@{query}",
-            "Snapchat": f"https://snapchat.com/add/{query}", "Behance": f"https://behance.net/{query}",
-            "HackerRank": f"https://hackerrank.com/{query}", "Chess.com": f"https://chess.com/member/{query}",
-            "Lichess": f"https://lichess.org/@{query}", "Bandcamp": f"https://bandcamp.com/{query}",
-            "Mixcloud": f"https://mixcloud.com/{query}", "IndieHackers": f"https://indiehackers.com/@{query}",
-            "CoinMarketCap": f"https://coinmarketcap.com/community/profile/{query}",
-            "PayPal": f"https://paypal.me/{query}", "Badoo": f"https://badoo.com/profile/{query}",
-            "Tinder": f"https://tinder.com/@{query}", "500px": f"https://500px.com/{query}",
-            "Slideshare": f"https://slideshare.net/{query}", "Wattpad": f"https://wattpad.com/user/{query}",
-            "Linktree": f"https://linktr.ee/{query}", "WordPress": f"https://{query}.wordpress.com",
-            "MyAnimeList": f"https://myanimelist.net/profile/{query}",
+            "GitHub": f"https://github.com/{query}", "Steam": f"https://steamcommunity.com/id/{query}",
+            "SoundCloud": f"https://soundcloud.com/{query}", "Pinterest": f"https://pinterest.com/{query}",
+            "Discord": f"https://discord.com/users/{query}", "LastFM": f"https://last.fm/user/{query}",
+            "Linktree": f"https://linktr.ee/{query}", "Patreon": f"https://patreon.com/{query}",
+            "OnlyFans": f"https://onlyfans.com/{query}", "Fansly": f"https://fansly.com/{query}",
+            "Boosty": f"https://boosty.to/{query}", "StreamElements": f"https://streamelements.com/{query}",
+            "LBRY": f"https://lbry.tv/@{query}", "Mastodon": f"https://mastodon.social/@{query}",
+            "Keybase": f"https://keybase.io/{query}", "Medium": f"https://medium.com/@{query}",
+            "CodePen": f"https://codepen.io/{query}", "Replit": f"https://replit.com/@{query}",
+            "HackTheBox": f"https://hackthebox.com/profile/{query}", "TryHackMe": f"https://tryhackme.com/p/{query}",
+            "LeetCode": f"https://leetcode.com/{query}", "Codeforces": f"https://codeforces.com/profile/{query}",
+            "Bitbucket": f"https://bitbucket.org/{query}", "SourceForge": f"https://sourceforge.net/u/{query}",
+            "WordPress": f"https://{query}.wordpress.com", "Carrd": f"https://{query}.carrd.co",
+            "Linkin.bio": f"https://linkin.bio/{query}", "Bio.link": f"https://bio.link/{query}",
+            "Kofi": f"https://ko-fi.com/{query}", "BuyMeACoffee": f"https://buymeacoffee.com/{query}",
+            "Gumroad": f"https://gumroad.com/{query}", "Etsy": f"https://etsy.com/shop/{query}",
+            "Redbubble": f"https://redbubble.com/people/{query}", "Teespring": f"https://teespring.com/stores/{query}",
+            "Threadless": f"https://threadless.com/@{query}", "Pixiv": f"https://pixiv.net/users/{query}",
+            "Danbooru": f"https://danbooru.donmai.us/users/{query}", "FurAffinity": f"https://furaffinity.net/user/{query}",
+            "Odysee": f"https://odysee.com/@{query}", "Rumble": f"https://rumble.com/user/{query}",
+            "Minds": f"https://minds.com/{query}", "Gab": f"https://gab.com/{query}",
+            "TruthSocial": f"https://truthsocial.com/@{query}", "MeWe": f"https://mewe.com/profile/{query}",
+            "Diaspora": f"https://diasporafoundation.org/people/{query}", "Misskey": f"https://misskey.io/@{query}",
+            "PeerTube": f"https://peertube.social/a/{query}", "DTube": f"https://d.tube/#!/c/{query}",
+            "Hive": f"https://hive.blog/@{query}", "Steemit": f"https://steemit.com/@{query}",
+            "Lemmy": f"https://lemmy.world/u/{query}", "Kbin": f"https://kbin.social/u/{query}",
+            "Discourse": f"https://meta.discourse.org/u/{query}", "XenForo": f"https://xenforo.com/community/members/{query}",
+            "Fansly": f"https://fansly.com/{query}", "ManyVids": f"https://www.manyvids.com/Profile/{query}",
+            "JustForFans": f"https://justforfans.com/{query}", "FanCentro": f"https://fancentro.com/{query}",
+            "LoyalFans": f"https://loyalfans.com/{query}", "Fanbox": f"https://fanbox.cc/{query}",
+            "Donationalerts": f"https://www.donationalerts.com/r/{query}", "Donorbox": f"https://donorbox.org/{query}",
+            "Streamlabs": f"https://streamlabs.com/{query}", "Tipeee": f"https://fr.tipeee.com/{query}",
+            "Liberapay": f"https://liberapay.com/{query}", "OpenCollective": f"https://opencollective.com/{query}",
+            "Fundrazr": f"https://fundrazr.com/{query}", "GoFundMe": f"https://www.gofundme.com/f/{query}",
+            "Kickstarter": f"https://www.kickstarter.com/profile/{query}", "Indiegogo": f"https://www.indiegogo.com/individual/{query}"
         }
-        tasks = [self.http.head(url) for url in platforms.values()]
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-        found, not_found = [], []
-        for (name, url), res in zip(platforms.items(), results):
-            if isinstance(res, int) and res in (200, 301, 302, 307):
-                found.append(f"🕸️ {name}: `{url}`")
-            else:
-                not_found.append(f"❌ {name}")
+
+        found, not_found, errors = [], 0, 0
+        platform_list = list(platforms.items())
+        semaphore = asyncio.Semaphore(10)  # Ограничение параллельных запросов
+
+        async def check_one(name, url):
+            async with semaphore:
+                try:
+                    status = await self.http.head(url, timeout=4)
+                    if status in (200, 301, 302, 307):
+                        return ("found", f"🕸️ {name}: `{url}`")
+                    return ("not_found", None)
+                except Exception:
+                    return ("error", None)
+
+        # Пакетная обработка с задержками
+        for i in range(0, len(platform_list), 15):
+            batch = platform_list[i:i+15]
+            tasks = [check_one(n, u) for n, u in batch]
+            results = await asyncio.gather(*tasks)
+            for res in results:
+                if res[0] == "found": found.append(res[1])
+                elif res[0] == "not_found": not_found += 1
+                else: errors += 1
+            await asyncio.sleep(0.3)  # Задержка между пакетами
+
         res = f"🕸️ **Никнейм:** `{query}`\n"
-        res += f"🕸️ **Найдено:** {len(found)} | ❌ **Не найдено:** {len(not_found)}\n"
+        res += f"🕸️ **Найдено:** {len(found)}/{len(platforms)}\n"
+        res += f"🕸️ **Не найдено:** {not_found}\n"
+        if errors: res += f"️ **Ошибок/таймаутов:** {errors}\n"
         if found:
-            res += "**🕸️ Активные профили:**\n" + "\n".join(found[:30])
-            if len(found) > 30:
-                res += f"\n... и ещё {len(found)-30}"
+            res += "\n**🕸️ Активные профили:**\n" + "\n".join(found[:80])
+            if len(found) > 80: res += f"\n... и ещё {len(found)-80}"
+
+        await self.db.log(0, "nick", query, "ok", time.time() - start_time)
+        await self.db.set_cache(f"nick:{query}", res, 3600)
         return res
 
-    def plugin_phone(self, query: str) -> str:
+    async def plugin_phone(self, query: str) -> str:
         try:
             p = phonenumbers.parse(query, None)
-            if not phonenumbers.is_valid_number(p):
-                return "🕸️ Номер невалиден"
+            if not phonenumbers.is_valid_number(p): return "️ Номер невалиден. Используйте формат: +79991234567"
             region_code = phonenumbers.region_code_for_number(p)
             region_name = geocoder.description_for_number(p, "ru")
             carr = carrier.name_for_number(p, "ru") or "Не определен"
-            tz = timezone.time_zones_for_number(p)
+            tz_list = timezone.time_zones_for_number(p)
             fmt = phonenumbers.format_number(p, phonenumbers.PhoneNumberFormat.INTERNATIONAL)
             num_type = phonenumbers.number_type(p)
-            type_map = {
-                phonenumbers.PhoneNumberType.MOBILE: "Мобильный",
-                phonenumbers.PhoneNumberType.FIXED_LINE: "Городской",
-                phonenumbers.PhoneNumberType.VOIP: "VoIP",
-                phonenumbers.PhoneNumberType.TOLL_FREE: "Бесплатный",
-                phonenumbers.PhoneNumberType.PREMIUM_RATE: "Премиум"
-            }
-            num_type_str = type_map.get(num_type, "Другой")
-            return (f"🕸️ **Номер:** `{fmt}`\n"
-                    f"🕸️ **Страна:** {region_name}\n"
-                    f"🕸️ **Регион:** {region_code}\n"
-                    f"🕸️ **Оператор:** {carr}\n"
-                    f"🕸️ **TZ:** {tz[0] if tz else 'N/A'}\n"
-                    f"🕸️ **Тип:** {num_type_str}")
+            type_map = {phonenumbers.PhoneNumberType.MOBILE: "Мобильный", phonenumbers.PhoneNumberType.FIXED_LINE: "Городской"}
+            res = (f"🕸️ **Номер:** `{fmt}`\n"
+                   f"🕸️ **Страна/Регион:** {region_name}\n"
+                   f"🕸️ **Оператор:** {carr}\n"
+                   f"🕸️ **Часовой пояс:** {tz_list[0] if tz_list else 'N/A'}\n"
+                   f"🕸️ **Тип:** {type_map.get(num_type, 'Другой')}")
+            return res
         except Exception as e:
-            return f"🕸️ Ошибка: {e}. Формат: +7..."
+            return f"🕸️ Ошибка: {str(e)}. Формат: +79991234567"
 
     def plugin_email(self, query: str) -> str:
-        if not re.match(r"^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+$", query):
-            return "🕸️ Неверный формат"
+        metrics.log_request("email")
+        if not self.security.validate_email(query): return "🕸️ Неверный формат email"
         domain = query.split("@")[1]
-        disp = ["tempmail.com", "guerrillamail.com", "mailinator.com", "yopmail.com", "sharklasers.com", "10minutemail.com"]
-        warn = "🕸️ Временный домен" if domain.lower() in disp else "🕸️ Домен надёжный"
-        return f"🕸️ **Email:** `{query}`\n🕸️ Домен: `{domain}`\n{warn}"
+        temp_domains = ["tempmail.com", "guerrillamail.com", "mailinator.com", "yopmail.com"]
+        warn = "🕸️ **⚠️ ВРЕМЕННЫЙ ДОМЕН!**" if domain.lower() in temp_domains else "🕸️ Домен надёжный"
+        return f"️ **Email:** `{query}`\n️ Домен: `{domain}`\n{warn}"
 
     async def plugin_breach(self, query: str) -> str:
-        if not re.match(r"^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+$", query):
-            return "🕸️ Введите корректный email"
+        metrics.log_request("breach")
+        if not self.security.validate_email(query): return "🕸️ Введите корректный email"
         results = await self.breach_db.search_email(query)
-        if not results:
-            return f"🕸️ **Email:** `{query}`\n🕸️ Не найден в базах утечек"
+        if not results: return f"🕸️ **Email:** `{query}`\n🕸️ Не найден в базах утечек"
         sources = {}
         for r in results:
             src = r.get("source", "Unknown")
-            if src not in sources:
-                sources[src] = []
-            sources[src].append(r)
-        res = f"🕸️ **Email:** `{query}`\n"
-        res += f"🕸️ **Найдено утечек:** {len(results)}\n"
-        res += f"🕸️ **Источников:** {len(sources)}\n"
+            sources.setdefault(src, []).append(r)
+        res = f"️ **Email:** `{query}`\n️ **Найдено утечек:** {len(results)}\n🕸️ **Источников:** {len(sources)}\n"
         for source, breaches in list(sources.items())[:5]:
             res += f"🕸️ **{source}** ({len(breaches)} записей):\n"
             for b in breaches[:3]:
                 pwd = b.get("password", "N/A")
-                masked_pwd = pwd[:2] + "*" * (len(pwd) - 2) if len(pwd) > 2 else "***"
-                res += f"   • `{masked_pwd}` ({b.get('date', 'N/A')})\n"
-            if len(breaches) > 3:
-                res += f"   ... и ещё {len(breaches)-3}\n"
-            res += "\n"
-        if len(sources) > 5:
-            res += f"... и ещё {len(sources)-5} источников\n"
-        res += "\n🕸️ **Рекомендации:**\n"
-        res += "1. Смените пароли на всех сервисах\n"
-        res += "2. Включите 2FA\n"
-        res += "3. Используйте уникальный пароль для каждого сервиса"
+                masked = pwd[:2] + "*" * (len(pwd) - 2) if len(pwd) > 2 else "***"
+                res += f"   • `{masked}` ({b.get('date', 'N/A')})\n"
         return res
 
     async def plugin_ton(self, query: str) -> str:
         cached = await self.db.get_cache(f"ton:{query}")
-        if cached:
-            return cached
+        if cached: return cached
         try:
             data = await self.http.get_json(f"https://toncenter.com/api/v2/getAddressInformation?address={query}")
             if data.get("ok"):
                 bal = int(data["result"].get("balance", 0)) / 1e9
                 is_wallet = "b5ee9c72" in data["result"].get("code", "")
-                res = f"🕸️ **TON:** `{query}`\n"
-                res += f"🕸️ **Баланс:** `{bal:.4f} TON`\n"
-                res += f"🕸️ **Тип:** {'Кошелёк' if is_wallet else 'Обычный адрес'}"
+                res = f"️ **TON:** `{query}`\n️ **Баланс:** `{bal:.4f} TON`\n🕸️ **Тип:** {'Кошелёк' if is_wallet else 'Обычный адрес'}"
                 await self.db.set_cache(f"ton:{query}", res, 60)
                 return res
             return "🕸️ Адрес не найден"
         except Exception as e:
-            return f"🕸️ Ошибка TON: {e}"
+            return f"🕸️ Ошибка TON: {str(e)}"
 
     async def plugin_tg_id(self, query: str, bot) -> str:
+        clean = query.replace("@", "").strip()
+        if not clean: return "🕸️ Введите username"
         try:
-            clean = query.replace("@", "").strip()
-            if not clean:
-                return "🕸️ Введите username"
-            try:
-                chat = await bot.get_chat(f"@{clean}")
-                return (f"🕸️ **Telegram:** `{clean}`\n"
-                        f"🕸️ **ID:** `{chat.id}`\n"
-                        f"🕸️ **Имя:** {chat.first_name or ''} {chat.last_name or ''}\n"
-                        f"🕸️ **Username:** @{chat.username or 'N/A'}\n"
-                        f"🕸️ **Бот:** {'Да' if chat.is_bot else 'Нет'}\n"
-                        f"🕸️ **Bio:** {chat.bio or 'Нет'}\n"
-                        f"🕸️ **Фото:** {'Есть' if chat.photo else 'Нет'}")
-            except Exception as e1:
-                return (f"🕸️ **Telegram:** `{clean}`\n"
-                        f"🕸️ Пользователь не найден ботом.\n"
-                        f"🕸️ **Причины:**\n"
-                        f"• Никогда не писал боту\n"
-                        f"• Приватный аккаунт\n"
-                        f"• Username изменён\n"
-                        f"🕸️ Попробуйте @userinfobot")
-        except Exception as e:
-            return f"🕸️ Ошибка: {e}"
+            chat = await bot.get_chat(f"@{clean}")
+            return (f"🕸️ **Telegram:** `{clean}`\n"
+                    f"🕸️ **ID:** `{chat.id}`\n"
+                    f"🕸️ **Имя:** {chat.first_name or ''} {chat.last_name or ''}\n"
+                    f"🕸️ **Username:** @{chat.username or 'N/A'}\n"
+                    f"️ **Бот:** {'✅ Да' if chat.is_bot else '❌ Нет'}")
+        except Exception:
+            return f"🕸️ **Telegram:** `{clean}`\n🕸️ Пользователь не найден ботом или аккаунт приватный."
 
     async def plugin_geo(self, query: str) -> str:
         parts = query.split()
-        if len(parts) != 2:
-            return "🕸️ Формат: `lat lon` (55.7558 37.6173)"
-        cached = await self.db.get_cache(f"geo:{query}")
-        if cached:
-            return cached
+        if len(parts) != 2: return "🕸️ Формат: `lat lon` (55.7558 37.6173)"
         try:
-            headers = {"User-Agent": "OSINT_FW/1.0"}
-            data = await self.http.get_json(
-                f"https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat={parts[0]}&lon={parts[1]}",
-                headers=headers
-            )
+            data = await self.http.get_json(f"https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat={parts[0]}&lon={parts[1]}")
             addr = data.get("address", {})
-            res = (f"🕸️ **Координаты:** `{parts[0]}, {parts[1]}`\n"
-                   f"🕸️ **Адрес:** `{data.get('display_name', 'Не найден')}`\n"
-                   f"🕸️ Город: {addr.get('city', addr.get('town', 'N/A'))}\n"
-                   f"🕸️ Улица: {addr.get('road', 'N/A')}\n"
-                   f"🕸️ Дом: {addr.get('house_number', 'N/A')}\n"
-                   f"🕸️ Индекс: {addr.get('postcode', 'N/A')}\n"
-                   f"🕸️ Страна: {addr.get('country', 'N/A')}")
-            await self.db.set_cache(f"geo:{query}", res, 86400)
-            return res
+            return (f"🕸️ **Координаты:** `{parts[0]}, {parts[1]}`\n"
+                    f"🕸️ **Адрес:** `{data.get('display_name', 'Не найден')}`\n"
+                    f"🕸️ Город: {addr.get('city', addr.get('town', 'N/A'))}\n"
+                    f"🕸️ Страна: {addr.get('country', 'N/A')}")
         except Exception as e:
-            return f"🕸️ Ошибка гео: {e}"
+            return f"🕸️ Ошибка гео: {str(e)}"
 
     async def plugin_discord(self, query: str) -> str:
+        if not re.match(r"^\d{17,19}$", query): return "🕸️ Введите Discord ID (число 17-19 цифр)"
+        user_id = int(query)
+        decoded = self.discord.decode_snowflake(user_id)
+        if not decoded: return "🕸️ Неверный Discord ID"
+        avatar_url = self.discord.avatar_url(user_id)
+        return (f"️ **Discord User**\n"
+                f"🕸️ **User ID:** `{user_id}`\n"
+                f"️ **Дата создания:** `{decoded['created_at']}`\n"
+                f"🕸️ **Возраст аккаунта:** {decoded['age_days']} дней\n"
+                f"🕸️ **Аватар:** [PNG]({avatar_url})")
+
+    async def plugin_exif(self, file_id: str, bot) -> str:
+        """Исправленный EXIF: поддержка фото и документов"""
+        metrics.log_request("exif")
         try:
-            if re.match(r"^\d{17,19}$", query):
-                user_id = int(query)
-                decoded = self.discord.decode_snowflake(user_id)
-                if not decoded:
-                    return "🕸️ Неверный Discord ID"
-                avatar_url = self.discord.avatar_url(user_id)
-                res = (f"🕸️ **Discord User**\n"
-                       f"🕸️ **User ID:** `{user_id}`\n"
-                       f"🕸️ **Internal ID:** `{decoded['internal_id']}`\n"
-                       f"🕸️ **Worker ID:** `{decoded['worker_id']}`\n"
-                       f"🕸️ **Process ID:** `{decoded['process_id']}`\n"
-                       f"🕸️ **Дата создания:** `{decoded['created_at']}`\n"
-                       f"🕸️ **Возраст аккаунта:**\n"
-                       f"   • Дней: `{decoded['age_days']}`\n"
-                       f"   • Часов: `{decoded['age_days'] * 24}`\n"
-                       f"🕸️ **Аватар:**\n"
-                       f"[PNG]({avatar_url.replace('.gif', '.png')}) | "
-                       f"[GIF]({avatar_url})\n"
-                       f"🕸️ **Поиск:**\n"
-                       f"[Google](https://google.com/search?q={user_id}) | "
-                       f"[Xeno](https://discord.id/) | "
-                       f"[Bin](https://discordbin.com/user/{user_id})\n"
-                       f"🕸️ **Snowflake декодер:**\n"
-                       f"`Timestamp: {decoded['unix_ts']}`\n"
-                       f"`Epoch: {self.discord.EPOCH}`")
-                return res
-            else:
-                return (f"🕸️ **Discord Username:** `{query}`\n"
-                        f"🕸️ Для детальной информации нужен **User ID**.\n"
-                        f"🕸️ **Как получить ID:**\n"
-                        f"1. Включите **Режим разработчика** в настройках Discord\n"
-                        f"2. ПКМ по пользователю → **Копировать ID**\n"
-                        f"3. Вставьте ID в бота\n"
-                        f"🕸️ Инструкция: https://support.discord.com/hc/articles/206346498")
+            file = await bot.get_file(file_id)
+            file_bytes = await file.download_as_bytearray()
+            
+            # Проверка, что это действительно изображение
+            try:
+                img = Image.open(io.BytesIO(file_bytes))
+                img.verify() # Проверка целостности
+                img = Image.open(io.BytesIO(file_bytes)) # Перезагрузка после verify
+            except Exception:
+                return "🕸️ Файл не является корректным изображением. Отправьте JPG/PNG/TIFF."
+
+            exif_data = img._getexif()
+            if not exif_data:
+                return "🕸️ **EXIF:** Метаданные отсутствуют.\n️ Отправьте фото как 'Файл' (без сжатия Telegram)."
+
+            from PIL.ExifTags import TAGS
+            decoded = {}
+            for tag_id, value in exif_data.items():
+                tag = TAGS.get(tag_id, tag_id)
+                if isinstance(value, bytes):
+                    try: value = value.decode('utf-8', errors='ignore')
+                    except: value = str(value)
+                decoded[tag] = value
+
+            res = "🕸️ **EXIF Метаданные:**\n"
+            important_tags = ["DateTimeOriginal", "DateTime", "Make", "Model", "Software",
+                              "GPSInfo", "DateTimeDigitized", "LensModel", "ExifVersion",
+                              "ISOSpeedRatings", "FNumber", "ExposureTime", "Flash"]
+            for tag in important_tags:
+                if tag in decoded:
+                    val = decoded[tag]
+                    if tag == "GPSInfo" and isinstance(val, dict):
+                        res += f"🕸️ **{tag}:** GPS данные найдены 📍\n"
+                    else:
+                        res += f"️ **{tag}:** `{val}`\n"
+            extra_count = len(decoded) - len(important_tags)
+            if extra_count > 0: res += f"\n... и ещё {extra_count} метаданных"
+            return res
         except Exception as e:
-            return f"🕸️ Ошибка Discord: {e}"
+            return f"🕸️ Ошибка чтения EXIF: {str(e)}"
 
 # ==========================================================
-# 🤖 TELEGRAM BOT С МОНЕТИЗАЦИЕЙ
+#  TELEGRAM BOT (ПОЛНАЯ ЛОГИКА)
 # ==========================================================
 fw = OSINTFramework()
+admin_sessions: Dict[int, dict] = {}
+user_states: Dict[int, dict] = {}
 
-# Клавиатуры
 KB_MAIN = InlineKeyboardMarkup([
-    [InlineKeyboardButton("🕸️ IP Info", callback_data="ip"), InlineKeyboardButton("🕸️ DNS/WHOIS", callback_data="dns")],
-    [InlineKeyboardButton("🕸️ Nick Scan", callback_data="nick"), InlineKeyboardButton("🕸️ Phone", callback_data="phone")],
-    [InlineKeyboardButton("🕸️ Email", callback_data="email"), InlineKeyboardButton("🕸️ Breach DB", callback_data="breach")],
-    [InlineKeyboardButton("🕸️ TON Wallet", callback_data="ton"), InlineKeyboardButton("🕸️ TG User", callback_data="tg_id")],
-    [InlineKeyboardButton("🕸️ Subdomains", callback_data="subs"), InlineKeyboardButton("🕸️ Discord", callback_data="discord")],
-    [InlineKeyboardButton("🕸️ GeoINT", callback_data="geo"), InlineKeyboardButton("🕸️ DB Stats", callback_data="dbstats")],
-    [InlineKeyboardButton("💰 Купить запросы", callback_data="buy"), InlineKeyboardButton("👥 Рефералы", callback_data="referral")],
-    [InlineKeyboardButton("🪞 Создать зеркало", callback_data="mirror"), InlineKeyboardButton("📊 Баланс", callback_data="balance")]
+    [InlineKeyboardButton("🕸️ IP Info", callback_data="tool_ip"), InlineKeyboardButton("️ Phone", callback_data="tool_phone")],
+    [InlineKeyboardButton("️ Nick 200+", callback_data="tool_nick"), InlineKeyboardButton("🕸️ Email", callback_data="tool_email")],
+    [InlineKeyboardButton("🕸️ Breach DB", callback_data="tool_breach"), InlineKeyboardButton("🕸️ Discord", callback_data="tool_discord")],
+    [InlineKeyboardButton("🕸️ DNS/WHOIS", callback_data="tool_dns"), InlineKeyboardButton("🕸️ TON", callback_data="tool_ton")],
+    [InlineKeyboardButton("📊 Баланс", callback_data="balance"), InlineKeyboardButton("📷 EXIF", callback_data="tool_exif")],
+    [InlineKeyboardButton("🔐 Админка", callback_data="admin_start")]
 ])
 
-KB_BACK = InlineKeyboardMarkup([[InlineKeyboardButton("🕸️ Меню", callback_data="menu")]])
-
-KB_BUY = InlineKeyboardMarkup([
-    [InlineKeyboardButton("🔹 50 запросов - 100₽", callback_data="buy_50")],
-    [InlineKeyboardButton("🔹 200 запросов - 300₽", callback_data="buy_200")],
-    [InlineKeyboardButton("🔹 500 запросов - 600₽", callback_data="buy_500")],
-    [InlineKeyboardButton("♾️ Безлимит на месяц - 999₽", callback_data="buy_unlimited")],
-    [InlineKeyboardButton("🔙 Назад", callback_data="menu")]
+KB_ADMIN_LOGIN = InlineKeyboardMarkup([[InlineKeyboardButton("🔐 Войти", callback_data="admin_enter_pass")]])
+KB_ADMIN = InlineKeyboardMarkup([
+    [InlineKeyboardButton("📊 Статистика", callback_data="admin_stats"), InlineKeyboardButton("👥 Юзеры", callback_data="admin_users")],
+    [InlineKeyboardButton("📜 Логи", callback_data="admin_logs"), InlineKeyboardButton("🚫 Бан/Разбан", callback_data="admin_ban")],
+    [InlineKeyboardButton("🔙 Выйти", callback_data="admin_logout")]
 ])
+KB_BACK = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Меню", callback_data="menu")]])
+
+async def check_banned(uid: int, update_or_q, is_callback=False):
+    """Глобальная проверка бана"""
+    user = await fw.db.get_user(uid)
+    if user and user.get('is_banned'):
+        if is_callback:
+            await update_or_q.answer(" Ваш аккаунт заблокирован", show_alert=True)
+        else:
+            await update_or_q.reply_text("🚫 Ваш аккаунт заблокирован. Обратитесь к администратору.")
+        return True
+    return False
 
 async def start_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    user_id = user.id
-    
-    # Проверяем есть ли реферальный код в start
-    ref_code = None
-    mirror_code = None
-    
+    uid = user.id
+    user_data = await fw.db.get_user(uid)
+    if not user_data:
+        await fw.db.create_user(uid, user.username or "", user.first_name or "", user.last_name or "")
+        user_data = await fw.db.get_user(uid)
     if ctx.args:
         param = ctx.args[0]
-        if param.startswith('ref_'):
-            ref_code = param
-        elif param.startswith('mirror_'):
-            mirror_code = param.replace('mirror_', '')
+        if param.startswith("ref_"):
+            try:
+                ref_id = int(param.split("_")[1])
+                if ref_id != uid: await fw.db.process_referral(uid, ref_id)
+            except: pass
+        elif param.startswith("mirror_"):
+            code = param.replace("mirror_", "")
+            creator = await fw.db.activate_mirror(uid, code)
+            if creator: await update.message.reply_text(f"🪞 Зеркало активировано!")
     
-    # Создаём или обновляем пользователя
-    user_data = await fw.db.get_user(user_id)
-    if not user_data:
-        await fw.db.create_user(user_id, user.username or "", user.first_name or "", user.last_name or "")
-        # Если есть реферальный код - обрабатываем
-        if ref_code:
-            # Извлекаем ID реферера из кода
-            referrer_id = int(ref_code.split('_')[1])
-            await fw.db.process_referral(user_id, referrer_id)
-            await update.message.reply_text(f"🎉 Вы получили +{REFERRAL_BONUS} запросов по реферальной ссылке!")
-        # Если активировали зеркало
-        elif mirror_code:
-            await fw.db.process_mirror_activation(user_id, mirror_code)
-            await update.message.reply_text(f"🪞 Зеркало активировано! Создатель получил +{MIRROR_BONUS} запросов.")
-    else:
-        await fw.db.update_user(user_id, username=user.username or "", last_active=datetime.now().isoformat())
-    
-    db_stats = await fw.breach_db.get_stats()
+    balance = "♾️ Admin" if user_data.get('is_admin') else user_data['requests_left']
     await update.message.reply_text(
-        f"🕸️ **OSINT FRAMEWORK v8.0**\n\n"
-        f"💰 **Ваш баланс:** {user_data['requests_left'] if user_data else FREE_REQUESTS} запросов\n\n"
-        f"🕸️ **Базы утечек:**\n"
-        f"• Email breaches: `{db_stats['breaches']:,}`\n"
-        f"• Phone leaks: `{db_stats['phones']:,}`\n"
-        f"• Combo lists: `{db_stats['combos']:,}`\n\n"
-        f"🕸️ **Доступные модули:**\n"
-        f"• 150+ платформ для ника\n"
-        f"• Discord snowflake decoder\n"
-        f"• Локальный поиск по базам\n\n"
-        f"🎁 **Бонусы:**\n"
-        f"• Приглашай друзей: +{REFERRAL_BONUS} запросов\n"
-        f"• Создавай зеркала: +{MIRROR_BONUS} запросов\n\n"
-        f"🕸️ **White Hat Only!**\n"
-        f"Используйте только в законных целях.",
+        f"🕸️ **OSINT v15.2 ENTERPRISE**\n👤 **ID:** `{uid}`\n💰 **Баланс:** {balance}\n🔧 **Статус:** {' Admin' if user_data.get('is_admin') else 'User'}\n🕸️ Выберите инструмент:",
         reply_markup=KB_MAIN, parse_mode="Markdown"
     )
 
 async def balance_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    user_data = await fw.db.get_user(user_id)
-    if not user_data:
-        await update.message.reply_text("🕸️ Сначала нажмите /start")
-        return
-    
-    total_used = user_data['total_requests'] - user_data['requests_left']
-    
+    uid = update.effective_user.id
+    if await check_banned(uid, update.message): return
+    user_data = await fw.db.get_user(uid)
+    if not user_data: return await update.message.reply_text("🕸️ Сначала нажмите /start")
+    balance = "️ Admin/Premium" if user_data.get('is_admin') or user_data.get('is_premium') else user_data['requests_left']
+    rate_stats = fw.limiter.get_stats(uid)
     await update.message.reply_text(
-        f"📊 **Ваш баланс:**\n\n"
-        f"🔹 Доступно запросов: **{user_data['requests_left']}**\n"
-        f"🔹 Всего использовано: **{total_used}**\n"
-        f"🔹 Premium: **{'✅ Да' if user_data['is_premium'] else '❌ Нет'}**\n\n"
-        f"💡 **Как получить ещё:**\n"
-        f"• Пригласите друга: +{REFERRAL_BONUS} запросов\n"
-        f"• Создайте зеркало: +{MIRROR_BONUS} запросов\n"
-        f"• Купите пакет в разделе /buy",
+        f"📊 **ВАШ БАЛАНС**\n\n"
+        f"💰 Доступно запросов: **{balance}**\n"
+        f"📈 Всего использовано: **{user_data.get('total_requests', 0)}**\n"
+        f"👑 Premium: **{'✅ Да' if user_data.get('is_premium') else '❌ Нет'}**\n"
+        f"🚫 Забанен: **{'✅ Да' if user_data.get('is_banned') else '❌ Нет'}**\n\n"
+        f"📡 **Лимиты:**\n"
+        f"• В минуту: {rate_stats['minute']}\n"
+        f"• В час: {rate_stats['hourly']}\n"
+        f"• В день: {rate_stats['daily']}",
         parse_mode="Markdown"
     )
 
-async def buy_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "💰 **Выберите пакет:**\n\n"
-        "🔹 **50 запросов** - 100₽ (~67 звёзд)\n"
-        "🔹 **200 запросов** - 300₽ (~200 звёзд)\n"
-        "🔹 **500 запросов** - 600₽ (~400 звёзд)\n"
-        "♾️ **Безлимит на месяц** - 999₽ (~666 звёзд)\n\n"
-        "💡 Telegram Stars принимаются автоматически",
-        reply_markup=KB_BUY, parse_mode="Markdown"
-    )
-
-async def referral_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    ref_code = await fw.db.get_referral_code(user_id)
-    
-    if not ref_code:
-        await update.message.reply_text("🕸️ Ошибка. Нажмите /start")
-        return
-    
-    bot_username = (await fw.db.get_bot_username()).replace('@', '')
-    ref_link = f"https://t.me/{bot_username}?start={ref_code}"
-    
-    await update.message.reply_text(
-        f"👥 **Реферальная программа:**\n\n"
-        f"Пригласите друзей и получите **{REFERRAL_BONUS} запросов** за каждого!\n\n"
-        f"🔗 **Ваша ссылка:**\n`{ref_link}`\n\n"
-        f"📊 **Статистика:**\n"
-        f"• Приглашено: 0\n"
-        f"• Получено бонусов: 0\n\n"
-        f"💡 Отправьте ссылку друзьям!",
-        parse_mode="Markdown"
-    )
-
-async def mirror_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    user_data = await fw.db.get_user(user_id)
-    
-    if not user_data:
-        await update.message.reply_text("🕸️ Сначала нажмите /start")
-        return
-    
-    # Проверяем есть ли уже активное зеркало
-    async with aiosqlite.connect(DB_PATH) as db:
-        cursor = await db.execute(
-            "SELECT mirror_url FROM mirrors WHERE user_id = ? AND is_active = TRUE LIMIT 1",
-            (user_id,))
-        row = await cursor.fetchone()
-    
-    if row:
-        await update.message.reply_text(
-            f"🪞 **Ваше зеркало уже создано:**\n\n"
-            f"🔗 `{row[0]}`\n\n"
-            f"💡 Каждое использование даёт вам +{MIRROR_BONUS} запросов!",
-            parse_mode="Markdown"
-        )
-        return
-    
-    # Создаём новое зеркало
-    mirror_url = await fw.db.create_mirror(user_id)
-    
-    await update.message.reply_text(
-        f"🪞 **Зеркало создано!**\n\n"
-        f"🔗 **Ссылка:**\n`{mirror_url}`\n\n"
-        f"🎁 Вы получили **+{MIRROR_BONUS} запросов**!\n\n"
-        f"💡 Отправьте ссылку друзьям - за каждое использование вы получите бонус!",
-        parse_mode="Markdown"
-    )
-
-# Обработчик покупок
-async def buy_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    
-    user_id = query.from_user.id
-    data = query.data
-    
-    packages = {
-        'buy_50': {'requests': 50, 'price': 100, 'stars': 67},
-        'buy_200': {'requests': 200, 'price': 300, 'stars': 200},
-        'buy_500': {'requests': 500, 'price': 600, 'stars': 400},
-        'buy_unlimited': {'requests': 999999, 'price': 999, 'stars': 666}
-    }
-    
-    if data not in packages:
-        return
-    
-    pkg = packages[data]
-    
-    # Создаём инвойс Telegram Stars
-    prices = [LabeledPrice(label="Telegram Stars", amount=pkg['stars'])]
-    
-    await context.bot.send_invoice(
-        chat_id=user_id,
-        title=f"OSINT Запросы ({pkg['requests']} шт)",
-        description=f"Покупка {pkg['requests']} запросов для OSINT Framework",
-        payload=f"osint_{pkg['requests']}",
-        provider_token="",  # Для Stars не нужен
-        currency="XTR",  # Telegram Stars
-        prices=prices,
-        start_parameter=f"buy_{pkg['requests']}",
-    )
-
-async def pre_checkout_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    query = update.pre_checkout_query
-    await query.answer(ok=True)
-
-async def successful_payment_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    payment = update.message.successful_payment
-    user_id = update.effective_user.id
-    
-    # Извлекаем количество запросов из payload
+async def ban_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    if uid not in ADMIN_IDS: return await update.message.reply_text("❌ Доступ запрещён!")
+    if len(ctx.args) < 1: return await update.message.reply_text("🚫 Использование: `/ban user_id [причина]`", parse_mode="Markdown")
     try:
-        requests = int(payment.invoice_payload.replace('osint_', ''))
-    except:
-        requests = 50
-    
-    # Начисляем запросы
-    await fw.db.add_requests(user_id, requests)
-    
-    # Логируем транзакцию
-    total_stars = sum(price.amount for price in update.message.successful_payment.total_amount)
-    await fw.db.log_transaction(
-        user_id, 
-        "stars_payment", 
-        total_stars, 
-        requests,
-        payment.telegram_payment_charge_id
-    )
-    
-    await update.message.reply_text(
-        f"✅ **Оплата прошла успешно!**\n\n"
-        f"🎁 Вам начислено **{requests} запросов**!\n"
-        f"💰 Списано: {total_stars} звёзд\n\n"
-        f"🕸️ Теперь у вас {await (await fw.db.get_user(user_id))['requests_left']} запросов.",
-        parse_mode="Markdown"
-    )
+        target_id = int(ctx.args[0])
+        reason = " ".join(ctx.args[1:]) if len(ctx.args) > 1 else "Нарушение правил"
+        if await fw.db.ban_user(target_id, reason):
+            await update.message.reply_text(f"✅ Пользователь `{target_id}` заблокирован.\nПричина: {reason}", parse_mode="Markdown")
+            try: await ctx.bot.send_message(target_id, f"🚫 Ваш аккаунт заблокирован.\nПричина: {reason}")
+            except: pass
+        else: await update.message.reply_text("❌ Не удалось заблокировать пользователя")
+    except ValueError: await update.message.reply_text("❌ Неверный формат ID")
+    except Exception as e: await update.message.reply_text(f"❌ Ошибка: {str(e)}")
+
+async def unban_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    if uid not in ADMIN_IDS: return await update.message.reply_text(" Доступ запрещён!")
+    if len(ctx.args) < 1: return await update.message.reply_text("✅ Использование: `/unban user_id`", parse_mode="Markdown")
+    try:
+        target_id = int(ctx.args[0])
+        if await fw.db.unban_user(target_id):
+            await update.message.reply_text(f"✅ Пользователь `{target_id}` разблокирован", parse_mode="Markdown")
+            try: await ctx.bot.send_message(target_id, "✅ Ваш аккаунт разблокирован")
+            except: pass
+        else: await update.message.reply_text("❌ Не удалось разблокировать пользователя")
+    except ValueError: await update.message.reply_text("❌ Неверный формат ID")
+    except Exception as e: await update.message.reply_text(f"❌ Ошибка: {str(e)}")
 
 async def callback_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
     data = q.data
-    
-    if data == "menu":
-        await q.edit_message_text("🕸️ **OSINT Модули:**", reply_markup=KB_MAIN)
-        return
-    if data == "dbstats":
-        if q.from_user.id not in ADMIN_IDS:
-            await q.edit_message_text("🕸️ Доступ только админам.", reply_markup=KB_BACK)
-            return
-        stats = await fw.breach_db.get_stats()
-        async with aiosqlite.connect(DB_PATH) as db:
-            cur = await db.execute("SELECT COUNT(*) FROM users")
-            users = (await cur.fetchone())[0]
-            cur = await db.execute("SELECT COUNT(*) FROM logs")
-            logs = (await cur.fetchone())[0]
-        await q.edit_message_text(
-            f"🕸️ **Статистика:**\n"
-            f"🕸️ **Базы утечек:**\n"
-            f"• Breaches: `{stats['breaches']:,}`\n"
-            f"• Phones: `{stats['phones']:,}`\n"
-            f"• Combos: `{stats['combos']:,}`\n\n"
-            f"🕸️ **Пользователей:** `{users}`\n"
-            f"🕸️ **Запросов:** `{logs}`",
-            reply_markup=KB_BACK, parse_mode="Markdown"
-        )
-        return
-    if data == "buy":
-        await buy_callback(update, ctx)
-        return
-    if data == "referral":
-        await referral_cmd(update, ctx)
-        return
-    if data == "mirror":
-        await mirror_cmd(update, ctx)
-        return
-    if data == "balance":
-        await balance_cmd(update, ctx)
-        return
-    if data.startswith('buy_'):
-        await buy_callback(update, ctx)
-        return
+    uid = q.from_user.id
+    if await check_banned(uid, q, is_callback=True): return
 
-    prompts = {
-        "ip": "🕸️ Введите **IPv4**:",
-        "dns": "🕸️ Введите **домен**:",
-        "subs": "🕸️ Введите **домен**:",
-        "nick": "🕸️ Введите **никнейм**:",
-        "phone": "🕸️ Введите **номер** (+7...):",
-        "email": "🕸️ Введите **email**:",
-        "breach": "🕸️ Введите **email** для поиска в базах:",
-        "ton": "🕸️ Введите **TON адрес**:",
-        "tg_id": "🕸️ Введите **username** (без @):",
-        "geo": "🕸️ Введите **координаты** `lat lon`:",
-        "discord": "🕸️ Введите **Discord ID**:",
-        "whois": "🕸️ Введите **домен**:"
-    }
-    if data in prompts:
-        ctx.user_data["awaiting"] = data
-        await q.edit_message_text(prompts[data], reply_markup=KB_BACK, parse_mode="Markdown")
+    if data == "menu":
+        return await q.edit_message_text("🕸️ **OSINT v15.2:**", reply_markup=KB_MAIN, parse_mode="Markdown")
+    if data == "balance":
+        return await balance_cmd(update, ctx)
+    if data == "admin_start":
+        if uid not in ADMIN_IDS: return await q.answer("❌ Доступ запрещён!", show_alert=True)
+        return await q.edit_message_text("🔐 **АДМИН-ПАНЕЛЬ**\nНажмите Войти", reply_markup=KB_ADMIN_LOGIN)
+    if data == "admin_enter_pass":
+        if uid not in ADMIN_IDS: return await q.answer("❌", show_alert=True)
+        admin_sessions[uid] = {"state": "wait_pass"}
+        return await q.edit_message_text("🔐 **Введите пароль:**\nОтправьте сообщением", reply_markup=KB_BACK)
+    if data == "admin_stats":
+        if admin_sessions.get(uid, {}).get("state") != "authorized": return await q.answer("❌ Авторизуйтесь!", show_alert=True)
+        stats = await fw.db.get_stats()
+        breach_stats = await fw.breach_db.get_stats()
+        return await q.edit_message_text(
+            f"📊 **СТАТИСТИКА БОТА**\n👥 Пользователи: {stats['total_users']}\n🟢 Активные (24ч): {stats['active_24h']}\n"
+            f"💰 Premium: {stats['premium_users']}\n🚫 Забанено: {stats['banned_users']}\n"
+            f"🔍 Запросов: {stats['total_requests']}\n📅 Сегодня: {stats['today_requests']}\n"
+            f"🗄️ Breaches: {breach_stats['breaches']}\n📱 Phones: {breach_stats['phones']}\n⏱️ Аптайм: {stats['uptime']}",
+            reply_markup=KB_ADMIN, parse_mode="Markdown"
+        )
+    if data == "admin_users":
+        if admin_sessions.get(uid, {}).get("state") != "authorized": return await q.answer("❌", show_alert=True)
+        users = await fw.db.get_all_users(limit=30)
+        msg = "👥 **ПОЛЬЗОВАТЕЛИ**\n"
+        for u in users:
+            status = "🚫" if u.get('is_banned') else "✅"
+            prem = "👑" if u.get('is_premium') else ""
+            msg += f"{status}{prem} `{u['id']}` - @{u.get('username') or 'N/A'} ({u['requests_left']} зап.)\n"
+        return await q.edit_message_text(msg, reply_markup=KB_ADMIN, parse_mode="Markdown")
+    if data == "admin_logout":
+        admin_sessions.pop(uid, None)
+        return await q.edit_message_text("🔒 Выход из админки", reply_markup=KB_MAIN)
+    if data.startswith("tool_"):
+        tool = data.replace("tool_", "")
+        prompts = {
+            "ip": "🕸️ **IPv4:**\nВведите IP адрес (например: 8.8.8.8)",
+            "phone": "🕸️ **Телефон:**\nВведите номер в формате +7...",
+            "nick": "🕸️ **Никнейм:**\nВведите ник для поиска",
+            "email": "🕸️ **Email:**\nВведите email адрес",
+            "breach": "🕸️ **Email для поиска:**\nВведите email для проверки в базах",
+            "discord": "🕸️ **Discord ID:**\nВведите числовой ID (17-19 цифр)",
+            "dns": "🕸️ **Домен:**\nВведите домен (например: google.com)",
+            "ton": "🕸️ **TON адрес:**\nВведите адрес кошелька",
+            "exif": "📷 **Отправьте фото/файл:**\nДля чтения метаданных",
+        }
+        if tool in prompts:
+            user_states[uid] = {"tool": tool}
+            return await q.edit_message_text(prompts[tool], reply_markup=KB_BACK, parse_mode="Markdown")
 
 async def message_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
-    tool = ctx.user_data.get("awaiting")
+    text = update.message.text.strip() if update.message.text else ""
     
-    if not tool:
-        await update.message.reply_text("🕸️ Используйте кнопки меню 👇", reply_markup=KB_MAIN)
-        return
-    if await fw.db.is_blacklisted(uid):
-        await update.message.reply_text("🕸️ Вы заблокированы.")
-        ctx.user_data["awaiting"] = None
-        return
-    if not fw.limiter.allow(uid):
-        await update.message.reply_text(f"🕸️ Лимит: {RATE_LIMIT}/мин")
-        ctx.user_data["awaiting"] = None
-        return
-    
-    # Проверяем баланс
-    user_data = await fw.db.get_user(uid)
-    if not user_data or user_data['requests_left'] <= 0:
-        await update.message.reply_text(
-            "⚠️ **Недостаточно запросов!**\n\n"
-            "💡 Пополните баланс:\n"
-            "• /buy - купить запросы\n"
-            "• /referral - пригласить друга (+5 запросов)\n"
-            "• /mirror - создать зеркало (+5 запросов)",
-            reply_markup=KB_BUY,
-            parse_mode="Markdown"
-        )
-        return
-    
-    await update.message.reply_text("🕸️ Обработка...")
-    query = update.message.text.strip() if update.message.text else ""
-    
-    try:
-        plugin_func = fw.plugins.get(tool)
-        if not plugin_func:
-            res = "🕸️ Модуль не найден"
-        elif tool == "tg_id":
-            res = await plugin_func(query, ctx.bot)
-        else:
-            res = await plugin_func(query) if asyncio.iscoroutinefunction(plugin_func) else plugin_func(query)
-        
-        # Списываем запрос
-        await fw.db.use_request(uid)
-        
-        # Показываем результат
-        if len(res) > 4000:
-            chunks = [res[i:i+4000] for i in range(0, len(res), 4000)]
-            for chunk in chunks:
-                await update.message.reply_text(chunk, parse_mode="Markdown")
-        else:
-            # Показываем остаток запросов
-            new_balance = await fw.db.get_user(uid)
-            await update.message.reply_text(
-                f"{res}\n\n"
-                f"💰 **Осталось запросов:** {new_balance['requests_left']}",
-                parse_mode="Markdown"
-            )
-        
-        await fw.db.log(uid, tool, query if query else "photo", "ok")
-    except Exception as e:
-        await update.message.reply_text(f"🕸️ Ошибка: {e}")
-        await fw.db.log(uid, tool, query, f"error:{e}")
-    finally:
-        ctx.user_data["awaiting"] = None
-        await update.message.reply_text("🕸️ Следующий запрос:", reply_markup=KB_MAIN)
+    if await check_banned(uid, update.message): return
 
-# ==========================================================
-# 🚀 ЗАПУСК
-# ==========================================================
+    # Проверка пароля админа
+    if admin_sessions.get(uid, {}).get("state") == "wait_pass":
+        if text == ADMIN_PASSWORD:
+            admin_sessions[uid] = {"state": "authorized", "time": datetime.now()}
+            return await update.message.reply_text("✅ **Авторизация успешна!**", reply_markup=KB_ADMIN, parse_mode="Markdown")
+        else:
+            await update.message.reply_text("❌ Неверный пароль!")
+            admin_sessions.pop(uid, None)
+            return
+
+    # Обработка инструмента
+    if uid in user_states:
+        tool = user_states[uid]["tool"]
+        await update.message.reply_text("🕸️ Обработка...")
+        start_time = time.time()
+        try:
+            allowed, reason = fw.limiter.allow(uid, tool)
+            if not allowed: return await update.message.reply_text(f"🕸️ {reason}")
+            can_use, reason = await fw.db.use_request(uid)
+            if not can_use:
+                user_data = await fw.db.get_user(uid)
+                if not user_data or user_data.get('is_banned'): return await update.message.reply_text("🕸️ Вы заблокированы!")
+                return await update.message.reply_text(f"️ {reason}\n💡 Пополните баланс: /referral или /mirror")
+
+            func = fw.plugins.get(tool)
+            res = ""
+            if tool == "tg_id":
+                res = await func(text, ctx.bot)
+            elif tool == "exif":
+                file_id = None
+                if update.message.photo:
+                    file_id = update.message.photo[-1].file_id
+                elif update.message.document and update.message.document.mime_type.startswith('image/'):
+                    file_id = update.message.document.file_id
+                else:
+                    res = "️ Отправьте изображение (JPG, PNG, TIFF) как фото или файл."
+                    await update.message.reply_text(res)
+                    return
+                res = await func(file_id, ctx.bot)
+            else:
+                res = await func(text) if asyncio.iscoroutinefunction(func) else func(text)
+
+            response_time = time.time() - start_time
+            user_data = await fw.db.get_user(uid)
+            bal = "♾️" if user_data.get('is_admin') else user_data['requests_left']
+            
+            if len(res) > 4000:
+                for chunk in [res[i:i+4000] for i in range(0, len(res), 4000)]:
+                    await update.message.reply_text(chunk, parse_mode="Markdown")
+            else:
+                await update.message.reply_text(f"{res}\n💰 **Осталось:** {bal}", parse_mode="Markdown")
+            await fw.db.log(uid, tool, text if tool != "exif" else "photo", "ok", response_time)
+        except Exception as e:
+            logger.error(f"Plugin error {tool}: {traceback.format_exc()}")
+            await update.message.reply_text(f"🕸️ Ошибка: {str(e)}")
+            await fw.db.log(uid, tool, text, f"error:{str(e)}")
+        finally:
+            user_states.pop(uid, None)
+            await update.message.reply_text("🕸️ Следующий запрос:", reply_markup=KB_MAIN)
+        return
+
+    await update.message.reply_text("🕸️ Используйте кнопки меню 👇", reply_markup=KB_MAIN)
+
 async def main():
     await fw.init()
     app = ApplicationBuilder().token(BOT_TOKEN).build()
-    
-    # Хендлеры
     app.add_handler(CommandHandler("start", start_cmd))
     app.add_handler(CommandHandler("balance", balance_cmd))
-    app.add_handler(CommandHandler("buy", buy_cmd))
-    app.add_handler(CommandHandler("referral", referral_cmd))
-    app.add_handler(CommandHandler("mirror", mirror_cmd))
+    app.add_handler(CommandHandler("ban", ban_cmd))
+    app.add_handler(CommandHandler("unban", unban_cmd))
     app.add_handler(CallbackQueryHandler(callback_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
+    app.add_handler(MessageHandler(filters.PHOTO | filters.Document.ALL, message_handler))
+    logger.info("🕸️ OSINT v15.2 ENTERPRISE started!")
     
-    # Оплата Telegram Stars
-    app.add_handler(CallbackQueryHandler(pre_checkout_callback), group=1)
-    app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, successful_payment_callback))
-    
-    logger.info("🕸️ OSINT Framework v8.0 запущен с монетизацией!")
-    
+    if os.environ.get('RENDER') or os.environ.get('PORT'):
+        from aiohttp import web
+        async def handle(request): return web.Response(text="OSINT v15.2 ENTERPRISE 🕸️")
+        web_app = web.Application()
+        web_app.router.add_get('/', handle)
+        runner = web.AppRunner(web_app)
+        await runner.setup()
+        site = web.TCPSite(runner, '0.0.0.0', int(os.environ.get('PORT', PORT)))
+        await site.start()
+        
     await app.initialize()
     await app.start()
     await app.updater.start_polling()
-    
-    try:
-        await asyncio.Event().wait()
-    except KeyboardInterrupt:
-        logger.info("🕸️ Остановка...")
+    try: await asyncio.Event().wait()
+    except KeyboardInterrupt: logger.info("️ Stopping...")
     finally:
         await app.stop()
         await app.shutdown()
