@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 OSINT FRAMEWORK v7.0
-Russian Interface + Render.com Compatible
+Russian Regions + 150 Platforms
 """
 import asyncio
 import logging
@@ -24,12 +24,12 @@ import aiosqlite
 # ==========================================================
 # 🔧 КОНФИГУРАЦИЯ
 # ==========================================================
-BOT_TOKEN = os.getenv("BOT_TOKEN", "8586981878:AAH8w1r9CqLB9QndBjdpSXWc_b9uk_qC3c4")
+BOT_TOKEN = "8586981878:AAH8w1r9CqLB9QndBjdpSXWc_b9uk_qC3c4"
 ADMIN_IDS = [8449965783]
-DB_PATH = os.getenv("DB_PATH", "osint_framework.db")
-DATABASE_FOLDER = Path(os.getenv("DB_FOLDER", "database"))
-RATE_LIMIT = int(os.getenv("RATE_LIMIT", 10))
-CACHE_TTL = int(os.getenv("CACHE_TTL", 300))
+DB_PATH = "osint_framework.db"
+DATABASE_FOLDER = Path("database")
+RATE_LIMIT = 10
+CACHE_TTL = 300
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("OSINT")
@@ -49,7 +49,6 @@ class BotDatabase:
                 username TEXT,
                 first_name TEXT,
                 last_name TEXT,
-                lang TEXT DEFAULT 'ru',
                 created_at TEXT DEFAULT CURRENT_TIMESTAMP,
                 last_active TEXT
             );
@@ -72,11 +71,6 @@ class BotDatabase:
                 added_at TEXT DEFAULT CURRENT_TIMESTAMP
             );
             """)
-            # Добавляем колонку lang если её нет
-            try:
-                await db.execute("ALTER TABLE users ADD COLUMN lang TEXT DEFAULT 'ru'")
-            except:
-                pass
             await db.commit()
 
     async def log(self, user_id: int, plugin: str, query: str, status: str = "ok"):
@@ -327,7 +321,6 @@ class OSINTFramework:
             "ton": self.plugin_ton,
             "tg_id": self.plugin_tg_id,
             "geo": self.plugin_geo,
-            "exif": self.plugin_exif,
             "discord": self.plugin_discord
         })
         logger.info(f"🕸️ Registered {len(self.plugins)} plugins")
@@ -419,7 +412,7 @@ class OSINTFramework:
             "Threads": f"https://threads.net/@{query}", "Mastodon": f"https://mastodon.social/@{query}",
             "Snapchat": f"https://snapchat.com/add/{query}", "Behance": f"https://behance.net/{query}",
             "HackerRank": f"https://hackerrank.com/{query}", "Chess.com": f"https://chess.com/member/{query}",
-            "Lichess": f"https://lichess.org/@{query}", "Bandcamp": f"https://bandcamp.com/{query}",
+            "Lichess": f"https://lichess.org/@/{query}", "Bandcamp": f"https://bandcamp.com/{query}",
             "Mixcloud": f"https://mixcloud.com/{query}", "IndieHackers": f"https://indiehackers.com/@{query}",
             "CoinMarketCap": f"https://coinmarketcap.com/community/profile/{query}",
             "PayPal": f"https://paypal.me/{query}", "Badoo": f"https://badoo.com/profile/{query}",
@@ -507,55 +500,97 @@ class OSINTFramework:
             p = phonenumbers.parse(query, None)
             if not phonenumbers.is_valid_number(p):
                 return "🕸️ Номер невалиден"
+            
+            # Карта DEF-кодов России -> конкретные регионы
+            ru_regions = {
+                # Республики
+                "347": "Республика Башкортостан", "843": "Республика Татарстан",
+                "855": "Республика Татарстан", "877": "Республика Адыгея",
+                "388": "Республика Адыгея", "871": "Чеченская Республика",
+                "872": "Республика Дагестан", "873": "Республика Ингушетия",
+                "878": "Карачаево-Черкесская Республика", "879": "Кабардино-Балкарская Республика",
+                "867": "Республика Северная Осетия-Алания", "866": "Кабардино-Балкарская Республика",
+                "391": "Республика Хакасия", "394": "Республика Алтай",
+                "302": "Забайкальский край", "395": "Иркутская область",
+                "416": "Амурская область", "421": "Хабаровский край",
+                "423": "Приморский край", "424": "Сахалинская область",
+                "415": "Камчатский край", "427": "Магаданская область",
+                "411": "Республика Саха (Якутия)", "413": "Магаданская область",
+                "417": "Республика Саха (Якутия)", "426": "Еврейская АО",
+                "471": "Курская область", "472": "Белгородская область",
+                "473": "Воронежская область", "474": "Липецкая область",
+                "475": "Тамбовская область", "481": "Смоленская область",
+                "482": "Тверская область", "483": "Брянская область",
+                "484": "Калужская область", "485": "Ярославская область",
+                "486": "Орловская область", "487": "Тульская область",
+                "491": "Рязанская область", "492": "Владимирская область",
+                "493": "Ивановская область", "494": "Костромская область",
+                "495": "Москва", "496": "Московская область",
+                "498": "Московская область", "499": "Москва",
+                "811": "Псковская область", "812": "Санкт-Петербург",
+                "813": "Ленинградская область", "814": "Республика Карелия",
+                "815": "Мурманская область", "816": "Новгородская область",
+                "817": "Вологодская область", "818": "Архангельская область",
+                "820": "Вологодская область", "821": "Республика Коми",
+                "825": "Московская область", "826": "Московская область",
+                "831": "Нижегородская область", "833": "Кировская область",
+                "834": "Республика Мордовия", "835": "Чувашская Республика",
+                "836": "Республика Марий Эл", "841": "Пензенская область",
+                "842": "Ульяновская область", "844": "Волгоградская область",
+                "845": "Саратовская область", "846": "Самарская область",
+                "847": "Республика Калмыкия", "848": "Самарская область",
+                "851": "Астраханская область", "861": "Краснодарский край",
+                "862": "Краснодарский край (Сочи)", "863": "Ростовская область",
+                "865": "Ставропольский край", "869": "Ставропольский край",
+                "910": "Центральный ФО (МТС)", "911": "СЗФО (МТС)",
+                "912": "Урал (МТС)", "913": "Сибирь (МТС)",
+                "914": "Дальний Восток (МТС)", "915": "Центральный ФО (МТС)",
+                "916": "Москва и область (МТС)", "917": "Поволжье (МТС)",
+                "918": "Южный ФО (МТС)", "919": "Поволжье (МТС)",
+                "920": "Центральный ФО (МегаФон)", "921": "СЗФО (МегаФон)",
+                "922": "Урал (МегаФон)", "923": "Сибирь (МегаФон)",
+                "924": "Дальний Восток (МегаФон)", "925": "Москва и область (МегаФон)",
+                "926": "Москва и область (МегаФон)", "927": "Поволжье (МегаФон)",
+                "928": "Южный ФО (МегаФон)", "929": "Поволжье (МегаФон)",
+                "930": "Центральный ФО (МегаФон)", "931": "СЗФО (МегаФон)",
+                "932": "Урал (МегаФон)", "933": "Сибирь (МегаФон)",
+                "934": "Дальний Восток (МегаФон)", "936": "Москва (МегаФон)",
+                "937": "Поволжье (МегаФон)", "938": "Южный ФО (МегаФон)",
+                "939": "Поволжье (МегаФон)", "941": "СЗФО (МегаФон)",
+                "950": "Урал (Билайн)", "951": "Сибирь (Билайн)",
+                "952": "Дальний Восток (Билайн)", "953": "Поволжье (Билайн)",
+                "958": "Москва (Билайн)", "960": "Центральный ФО (Билайн)",
+                "961": "СЗФО (Билайн)", "962": "Урал (Билайн)",
+                "963": "Сибирь (Билайн)", "964": "Дальний Восток (Билайн)",
+                "965": "Москва (Билайн)", "966": "Москва (Билайн)",
+                "967": "Москва (Билайн)", "968": "Москва (Билайн)",
+                "969": "Москва (Билайн)", "977": "Москва (Теле2)",
+                "978": "Крым (Теле2)", "979": "Москва (Теле2)",
+                "980": "Центральный ФО (Теле2)", "981": "СЗФО (Теле2)",
+                "982": "Урал (Теле2)", "983": "Сибирь (Теле2)",
+                "984": "Дальний Восток (Теле2)", "985": "Москва (Теле2)",
+                "986": "Центральный ФО (Теле2)", "987": "Поволжье (МегаФон)",
+                "988": "Южный ФО (Теле2)", "989": "Поволжье (Теле2)",
+                "991": "Центральный ФО (Тинькофф)", "992": "Таджикистан",
+                "993": "Туркменистан", "994": "Азербайджан",
+                "995": "Грузия", "996": "Поволжье (МегаФон)",
+                "997": "Москва (Тинькофф)", "998": "Узбекистан",
+                "999": "РФ (разные операторы)"
+            }
+            
             region_code = phonenumbers.region_code_for_number(p)
             region_name = geocoder.description_for_number(p, "ru")
-            # Уточнение региона для РФ
-            if region_code == "RU" and (not region_name or region_name in ("Россия", "Russia")):
+            
+            # Определяем регион по DEF-коду для России
+            if region_code == "RU":
                 national = phonenumbers.format_number(p, phonenumbers.PhoneNumberFormat.NATIONAL)
                 code = re.sub(r'[^\d]', '', national)
                 if code.startswith('8'):
                     code = '7' + code[1:]
-                if len(code) > 3:
-                    code = code[1:4]
-                    ru_regions = {
-                        "347": "Республика Башкортостан", "843": "Республика Татарстан",
-                        "855": "Республика Татарстан", "495": "Москва", "499": "Москва",
-                        "812": "Санкт-Петербург", "383": "Новосибирская область",
-                        "861": "Краснодарский край", "863": "Ростовская область",
-                        "343": "Свердловская область", "423": "Приморский край",
-                        "846": "Самарская область", "831": "Нижегородская область",
-                        "473": "Воронежская область", "862": "Краснодарский край (Сочи)",
-                        "391": "Красноярский край", "421": "Хабаровский край",
-                        "844": "Волгоградская область", "845": "Саратовская область",
-                        "865": "Ставропольский край", "872": "Республика Дагестан",
-                        "871": "Чеченская Республика", "873": "Республика Ингушетия",
-                        "917": "Поволжье/Урал (МТС)", "927": "Поволжье/Урал (МегаФон)",
-                        "937": "Поволжье/Урал (МегаФон)", "987": "Поволжье/Урал (МегаФон)",
-                        "996": "Поволжье/Урал (МегаФон)", "903": "Москва (МТС)",
-                        "905": "Москва (МТС)", "906": "Москва (МТС)", "909": "Москва (МТС)",
-                        "910": "Центр (МТС)", "911": "СЗФО (МТС)", "912": "Урал (МТС)",
-                        "913": "Сибирь (МТС)", "914": "ДВ (МТС)", "915": "Центр (МТС)",
-                        "916": "Москва (МТС)", "918": "Юг (МТС)", "919": "Поволжье (МТС)",
-                        "920": "Центр (МегаФон)", "921": "СЗФО (МегаФон)", "922": "Урал (МегаФон)",
-                        "923": "Сибирь (МегаФон)", "924": "ДВ (МегаФон)", "925": "Москва (МегаФон)",
-                        "926": "Москва (МегаФон)", "928": "Юг (МегаФон)", "929": "Поволжье (МегаФон)",
-                        "930": "Центр (МегаФон)", "931": "СЗФО (МегаФон)", "932": "Урал (МегаФон)",
-                        "933": "Сибирь (МегаФон)", "934": "ДВ (МегаФон)", "936": "Москва (МегаФон)",
-                        "938": "Юг (МегаФон)", "939": "Поволжье (МегаФон)", "941": "СЗФО (МегаФон)",
-                        "950": "Урал (Билайн)", "951": "Сибирь (Билайн)", "952": "ДВ (Билайн)",
-                        "953": "Поволжье (Билайн)", "958": "Москва (Билайн)", "960": "Центр (Билайн)",
-                        "961": "СЗФО (Билайн)", "962": "Урал (Билайн)", "963": "Сибирь (Билайн)",
-                        "964": "ДВ (Билайн)", "965": "Москва (Билайн)", "966": "Москва (Билайн)",
-                        "967": "Москва (Билайн)", "968": "Москва (Билайн)", "969": "Москва (Билайн)",
-                        "977": "Москва (Теле2)", "978": "Крым (Теле2)", "979": "Москва (Теле2)",
-                        "980": "Центр (Теле2)", "981": "СЗФО (Теле2)", "982": "Урал (Теле2)",
-                        "983": "Сибирь (Теле2)", "984": "ДВ (Теле2)", "985": "Москва (Теле2)",
-                        "986": "Центр (Теле2)", "988": "Юг (Теле2)", "989": "Поволжье (Теле2)",
-                        "991": "Центр (Тинькофф)", "992": "Таджикистан", "993": "Туркменистан",
-                        "994": "Азербайджан", "995": "Грузия", "997": "Москва (Тинькофф)",
-                        "998": "Узбекистан", "999": "РФ (разные)"
-                    }
-                    region_name = ru_regions.get(code, f"Россия (код {code})")
+                if len(code) >= 4:
+                    def_code = code[1:4]
+                    region_name = ru_regions.get(def_code, region_name)
+            
             carr = carrier.name_for_number(p, "ru") or "Не определен"
             tz = timezone.time_zones_for_number(p)
             fmt = phonenumbers.format_number(p, phonenumbers.PhoneNumberFormat.INTERNATIONAL)
@@ -568,8 +603,9 @@ class OSINTFramework:
                 phonenumbers.PhoneNumberType.PREMIUM_RATE: "Премиум"
             }
             num_type_str = type_map.get(num_type, "Другой")
+            
             return (f"🕸️ **Номер:** `{fmt}`\n"
-                    f"🕸️ **Страна:** {region_name}\n"
+                    f"🕸️ **Страна:** Россия\n"
                     f"🕸️ **Регион:** {region_name}\n"
                     f"🕸️ **Оператор:** {carr}\n"
                     f"🕸️ **TZ:** {tz[0] if tz else 'N/A'}\n"
@@ -686,22 +722,6 @@ class OSINTFramework:
         except Exception as e:
             return f"🕸️ Ошибка гео: {e}"
 
-    async def plugin_exif(self, file_id: str, bot) -> str:
-        try:
-            file = await bot.get_file(file_id)
-            data = await file.download_as_bytearray()
-            img = Image.open(io.BytesIO(data))
-            exif = img.getexif()
-            if not exif:
-                return "🕸️ **EXIF:** Метаданные отсутствуют. Отправьте как 'Файл'."
-            tags = ["GPSInfo", "Model", "Make", "DateTimeOriginal", "Software", "LensModel"]
-            found = {exif.get_tag_name(tid): exif[tid] for tid in exif if exif.get_tag_name(tid) in tags}
-            if not found:
-                return "🕸️ **EXIF:** Данные есть, но ключевые метки скрыты."
-            return "🕸️ **EXIF Анализ:**\n" + "\n".join(f"🕸️ {k}: `{v}`" for k, v in found.items())
-        except Exception as e:
-            return f"🕸️ Ошибка фото: {e}"
-
     async def plugin_discord(self, query: str) -> str:
         try:
             if re.match(r"^\d{17,19}$", query):
@@ -745,24 +765,14 @@ class OSINTFramework:
 # 🤖 TELEGRAM BOT
 # ==========================================================
 fw = OSINTFramework()
-
-# КЛАВИАТУРА С РУССКИМИ НАЗВАНИЯМИ
 KB_MAIN = InlineKeyboardMarkup([
-    [InlineKeyboardButton("🕸️ IP Инфо", callback_data="ip"),
-     InlineKeyboardButton("🕸️ DNS/WHOIS", callback_data="dns")],
-    [InlineKeyboardButton("🕸️ Никнейм", callback_data="nick"),
-     InlineKeyboardButton("🕸️ Телефон", callback_data="phone")],
-    [InlineKeyboardButton("🕸️ Email", callback_data="email"),
-     InlineKeyboardButton("🕸️ Утечки", callback_data="breach")],
-    [InlineKeyboardButton("🕸️ TON Кошелёк", callback_data="ton"),
-     InlineKeyboardButton("🕸️ TG Пользователь", callback_data="tg_id")],
-    [InlineKeyboardButton("🕸️ Субдомены", callback_data="subs"),
-     InlineKeyboardButton("🕸️ Discord", callback_data="discord")],
-    [InlineKeyboardButton("🕸️ Геолокация", callback_data="geo"),
-     InlineKeyboardButton("🕸️ EXIF Фото", callback_data="exif")],
-    [InlineKeyboardButton("🕸️ Статистика БД", callback_data="dbstats")]
+    [InlineKeyboardButton("🕸️ IP Info", callback_data="ip"), InlineKeyboardButton("🕸️ DNS/WHOIS", callback_data="dns")],
+    [InlineKeyboardButton("🕸️ Nick Scan", callback_data="nick"), InlineKeyboardButton("🕸️ Phone", callback_data="phone")],
+    [InlineKeyboardButton("🕸️ Email", callback_data="email"), InlineKeyboardButton("🕸️ Breach DB", callback_data="breach")],
+    [InlineKeyboardButton("🕸️ TON Wallet", callback_data="ton"), InlineKeyboardButton("🕸️ TG User", callback_data="tg_id")],
+    [InlineKeyboardButton("🕸️ Subdomains", callback_data="subs"), InlineKeyboardButton("🕸️ Discord", callback_data="discord")],
+    [InlineKeyboardButton("🕸️ GeoINT", callback_data="geo"), InlineKeyboardButton("🕸️ DB Stats", callback_data="dbstats")]
 ])
-
 KB_BACK = InlineKeyboardMarkup([[InlineKeyboardButton("🕸️ Меню", callback_data="menu")]])
 
 async def start_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -770,15 +780,16 @@ async def start_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                             update.effective_user.first_name, update.effective_user.last_name)
     db_stats = await fw.breach_db.get_stats()
     await update.message.reply_text(
-        f"🕸️ **OSINT FRAMEWORK v7.0**\n\n"
+        f"🕸️ **OSINT FRAMEWORK v7.0**\n"
         f"🕸️ **Базы утечек:**\n"
         f"• Email breaches: `{db_stats['breaches']:,}`\n"
         f"• Phone leaks: `{db_stats['phones']:,}`\n"
-        f"• Combo lists: `{db_stats['combos']:,}`\n\n"
+        f"• Combo lists: `{db_stats['combos']:,}`\n"
         f"🕸️ **Доступные модули:**\n"
-        f"• 100+ платформ для ника\n"
+        f"• 150+ платформ для ника\n"
         f"• Discord snowflake decoder\n"
-        f"• Локальный поиск по базам\n\n"
+        f"• Локальный поиск по базам\n"
+        f"• Конкретные регионы РФ\n"
         f"🕸️ **White Hat Only!**\n"
         f"Используйте только в законных целях.",
         reply_markup=KB_MAIN, parse_mode="Markdown"
@@ -806,7 +817,7 @@ async def callback_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             f"🕸️ **Базы утечек:**\n"
             f"• Breaches: `{stats['breaches']:,}`\n"
             f"• Phones: `{stats['phones']:,}`\n"
-            f"• Combos: `{stats['combos']:,}`\n\n"
+            f"• Combos: `{stats['combos']:,}`\n"
             f"🕸️ **Пользователей:** `{users}`\n"
             f"🕸️ **Запросов:** `{logs}`",
             reply_markup=KB_BACK, parse_mode="Markdown"
@@ -814,19 +825,12 @@ async def callback_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
     prompts = {
-        "ip": "🕸️ Введите **IPv4**:",
-        "dns": "🕸️ Введите **домен**:",
-        "subs": "🕸️ Введите **домен**:",
-        "nick": "🕸️ Введите **никнейм**:",
-        "phone": "🕸️ Введите **номер** (+7...):",
-        "email": "🕸️ Введите **email**:",
-        "breach": "🕸️ Введите **email** для поиска в базах:",
-        "ton": "🕸️ Введите **TON адрес**:",
-        "tg_id": "🕸️ Введите **username** (без @):",
+        "ip": "🕸️ Введите **IPv4**:", "dns": "🕸️ Введите **домен**:", "subs": "🕸️ Введите **домен**:",
+        "nick": "🕸️ Введите **никнейм**:", "phone": "🕸️ Введите **номер** (+7...):",
+        "email": "🕸️ Введите **email**:", "breach": "🕸️ Введите **email** для поиска в базах:",
+        "ton": "🕸️ Введите **TON адрес**:", "tg_id": "🕸️ Введите **username** (без @):",
         "geo": "🕸️ Введите **координаты** `lat lon`:",
-        "exif": "🕸️ Отправьте **фото**:",
-        "discord": "🕸️ Введите **Discord ID**:",
-        "whois": "🕸️ Введите **домен**:"
+        "discord": "🕸️ Введите **Discord ID**:", "whois": "🕸️ Введите **домен**:"
     }
     if data in prompts:
         ctx.user_data["awaiting"] = data
@@ -849,19 +853,13 @@ async def message_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🕸️ Обработка...")
     query = update.message.text.strip() if update.message.text else ""
     try:
-        if tool == "exif":
-            if not update.message.photo:
-                res = "🕸️ Отправьте фото"
-            else:
-                res = await fw.plugin_exif(update.message.photo[-1].file_id, ctx.bot)
+        plugin_func = fw.plugins.get(tool)
+        if not plugin_func:
+            res = "🕸️ Модуль не найден"
+        elif tool == "tg_id":
+            res = await plugin_func(query, ctx.bot)
         else:
-            plugin_func = fw.plugins.get(tool)
-            if not plugin_func:
-                res = "🕸️ Модуль не найден"
-            elif tool == "tg_id":
-                res = await plugin_func(query, ctx.bot)
-            else:
-                res = await plugin_func(query) if asyncio.iscoroutinefunction(plugin_func) else plugin_func(query)
+            res = await plugin_func(query) if asyncio.iscoroutinefunction(plugin_func) else plugin_func(query)
         
         if len(res) > 4000:
             chunks = [res[i:i+4000] for i in range(0, len(res), 4000)]
@@ -878,7 +876,7 @@ async def message_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("🕸️ Следующий запрос:", reply_markup=KB_MAIN)
 
 # ==========================================================
-# 🚀 ЗАПУСК (Render.com Compatible)
+# 🚀 ЗАПУСК
 # ==========================================================
 async def main():
     await fw.init()
@@ -889,7 +887,7 @@ async def main():
     app.add_handler(MessageHandler(filters.PHOTO & ~filters.COMMAND, message_handler))
     logger.info("🕸️ OSINT Framework v7.0 запущен")
     
-    # 🌐 ХАК ДЛЯ RENDER.COM (FREE TIER) - запускаем веб-сервер
+    # 🌐 ХАК ДЛЯ RENDER.COM (FREE TIER)
     if os.environ.get('RENDER') or os.environ.get('PORT'):
         from aiohttp import web
         async def handle(request):
@@ -901,7 +899,7 @@ async def main():
         port = int(os.environ.get('PORT', 8080))
         site = web.TCPSite(runner, '0.0.0.0', port)
         await site.start()
-        logger.info(f"🕸️ Web server started on port {port} to keep Render awake")
+        logger.info(f"🕸️ Web server started on port {port}")
     
     await app.initialize()
     await app.start()
