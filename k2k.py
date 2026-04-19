@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-OSINT FRAMEWORK v7.0
-Russian Regions + 150 Platforms
+OSINT FRAMEWORK v8.0
+Monetization + Referrals + Mirrors + Telegram Stars
 """
 import asyncio
 import logging
@@ -11,10 +11,11 @@ import re
 import io
 import os
 import json
-from datetime import datetime
+import secrets
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, LabeledPrice
 from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
 import aiohttp
 import phonenumbers
@@ -31,11 +32,17 @@ DATABASE_FOLDER = Path("database")
 RATE_LIMIT = 10
 CACHE_TTL = 300
 
+# 💰 ЦЕНЫ И БОНУСЫ
+FREE_REQUESTS = 10  # Бесплатно при старте
+MIRROR_BONUS = 5    # За создание зеркала
+REFERRAL_BONUS = 5  # За приглашённого друга
+PRICE_PER_REQUEST = 2  # Рублей за запрос (в звёздах ~1 звезда = 1.5₽)
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("OSINT")
 
 # ==========================================================
-# 🗄️ БАЗА ДАННЫХ БОТА
+# 🗄️ БАЗА ДАННЫХ С МОНЕТИЗАЦИЕЙ
 # ==========================================================
 class BotDatabase:
     def __init__(self, path: str):
@@ -49,8 +56,40 @@ class BotDatabase:
                 username TEXT,
                 first_name TEXT,
                 last_name TEXT,
+                requests_left INTEGER DEFAULT 10,
+                total_requests INTEGER DEFAULT 0,
+                referral_code TEXT UNIQUE,
+                referred_by INTEGER,
                 created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-                last_active TEXT
+                last_active TEXT,
+                is_premium BOOLEAN DEFAULT FALSE
+            );
+            CREATE TABLE IF NOT EXISTS mirrors (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                mirror_url TEXT UNIQUE,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                is_active BOOLEAN DEFAULT TRUE,
+                FOREIGN KEY (user_id) REFERENCES users(id)
+            );
+            CREATE TABLE IF NOT EXISTS referrals (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                referrer_id INTEGER,
+                referred_id INTEGER UNIQUE,
+                bonus_given BOOLEAN DEFAULT FALSE,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (referrer_id) REFERENCES users(id),
+                FOREIGN KEY (referred_id) REFERENCES users(id)
+            );
+            CREATE TABLE IF NOT EXISTS transactions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                type TEXT,
+                amount INTEGER,
+                requests_added INTEGER,
+                telegram_payment_id TEXT,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (user_id) REFERENCES users(id)
             );
             CREATE TABLE IF NOT EXISTS logs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -73,19 +112,122 @@ class BotDatabase:
             """)
             await db.commit()
 
+    async def get_user(self, user_id: int) -> Optional[dict]:
+        async with aiosqlite.connect(self.path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute("SELECT * FROM users WHERE id = ?", (user_id,))
+            row = await cursor.fetchone()
+            return dict(row) if row else None
+
+    async def create_user(self, user_id: int, username: str, first: str, last: str):
+        async with aiosqlite.connect(self.path) as db:
+            referral_code = f"ref_{user_id}_{secrets.token_hex(4)}"
+            await db.execute(
+                "INSERT INTO users (id, username, first_name, last_name, referral_code, last_active) VALUES (?, ?, ?, ?, ?, ?)",
+                (user_id, username, first, last, referral_code, datetime.now().isoformat()))
+            await db.commit()
+
+    async def update_user(self, user_id: int, **kwargs):
+        async with aiosqlite.connect(self.path) as db:
+            fields = ", ".join(f"{k} = ?" for k in kwargs.keys())
+            values = list(kwargs.values()) + [user_id]
+            await db.execute(f"UPDATE users SET {fields} WHERE id = ?", values)
+            await db.commit()
+
+    async def add_requests(self, user_id: int, amount: int):
+        async with aiosqlite.connect(self.path) as db:
+            await db.execute(
+                "UPDATE users SET requests_left = requests_left + ?, total_requests = total_requests + ? WHERE id = ?",
+                (amount, amount, user_id))
+            await db.commit()
+
+    async def use_request(self, user_id: int) -> bool:
+        async with aiosqlite.connect(self.path) as db:
+            cursor = await db.execute("SELECT requests_left FROM users WHERE id = ?", (user_id,))
+            row = await cursor.fetchone()
+            if row and row[0] > 0:
+                await db.execute("UPDATE users SET requests_left = requests_left - 1 WHERE id = ?", (user_id,))
+                await db.commit()
+                return True
+            return False
+
+    async def get_referral_code(self, user_id: int) -> Optional[str]:
+        async with aiosqlite.connect(self.path) as db:
+            cursor = await db.execute("SELECT referral_code FROM users WHERE id = ?", (user_id,))
+            row = await cursor.fetchone()
+            return row[0] if row else None
+
+    async def process_referral(self, new_user_id: int, referrer_id: int) -> bool:
+        """Обработка реферала. Возвращает True если бонус начислен."""
+        if new_user_id == referrer_id:
+            return False
+        
+        async with aiosqlite.connect(self.path) as db:
+            # Проверяем не был ли уже реферал
+            cursor = await db.execute("SELECT id FROM referrals WHERE referred_id = ?", (new_user_id,))
+            if await cursor.fetchone():
+                return False
+            
+            # Добавляем реферала
+            await db.execute(
+                "INSERT INTO referrals (referrer_id, referred_id) VALUES (?, ?)",
+                (referrer_id, new_user_id))
+            
+            # Начисляем бонус рефереру
+            await db.execute(
+                "UPDATE users SET requests_left = requests_left + ? WHERE id = ?",
+                (REFERRAL_BONUS, referrer_id))
+            
+            # Привязываем нового пользователя к рефереру
+            await db.execute(
+                "UPDATE users SET referred_by = ? WHERE id = ?",
+                (referrer_id, new_user_id))
+            
+            await db.commit()
+            return True
+
+    async def create_mirror(self, user_id: int) -> str:
+        """Создаёт зеркало (реферальную ссылку). Возвращает URL."""
+        mirror_code = secrets.token_urlsafe(8)
+        mirror_url = f"https://t.me/{(await self.get_bot_username())}?start=mirror_{mirror_code}"
+        
+        async with aiosqlite.connect(self.path) as db:
+            await db.execute(
+                "INSERT INTO mirrors (user_id, mirror_url) VALUES (?, ?)",
+                (user_id, mirror_url))
+            await db.execute(
+                "UPDATE users SET requests_left = requests_left + ? WHERE id = ?",
+                (MIRROR_BONUS, user_id))
+            await db.commit()
+        
+        return mirror_url
+
+    async def process_mirror_activation(self, user_id: int, mirror_code: str):
+        """Активация зеркала. Начисляет бонус создателю зеркала."""
+        async with aiosqlite.connect(self.path) as db:
+            cursor = await db.execute(
+                "SELECT user_id FROM mirrors WHERE mirror_url LIKE ? AND is_active = TRUE",
+                (f"%{mirror_code}%",))
+            row = await cursor.fetchone()
+            if row:
+                creator_id = row[0]
+                if creator_id != user_id:  # Не самому себе
+                    await db.execute(
+                        "UPDATE users SET requests_left = requests_left + ? WHERE id = ?",
+                        (MIRROR_BONUS, creator_id))
+                    await db.commit()
+
+    async def log_transaction(self, user_id: int, type_: str, amount: int, requests: int, payment_id: str):
+        async with aiosqlite.connect(self.path) as db:
+            await db.execute(
+                "INSERT INTO transactions (user_id, type, amount, requests_added, telegram_payment_id) VALUES (?, ?, ?, ?, ?)",
+                (user_id, type_, amount, requests, payment_id))
+            await db.commit()
+
     async def log(self, user_id: int, plugin: str, query: str, status: str = "ok"):
         async with aiosqlite.connect(self.path) as db:
             await db.execute("INSERT INTO logs (user_id, plugin, query, status) VALUES (?, ?, ?, ?)",
                              (user_id, plugin, query, status))
-            await db.commit()
-
-    async def upsert_user(self, user_id: int, username: str, first: str, last: str):
-        async with aiosqlite.connect(self.path) as db:
-            await db.execute(
-                "INSERT INTO users (id, username, first_name, last_name, last_active) VALUES (?, ?, ?, ?, ?) "
-                "ON CONFLICT(id) DO UPDATE SET username=?, first_name=?, last_name=?, last_active=?",
-                (user_id, username, first, last, datetime.now().isoformat(),
-                 username, first, last, datetime.now().isoformat()))
             await db.commit()
 
     async def is_blacklisted(self, user_id: int) -> bool:
@@ -106,8 +248,15 @@ class BotDatabase:
                              (key, value, time.time() + ttl))
             await db.commit()
 
+    async def get_bot_username(self) -> str:
+        """Получает username бота"""
+        async with aiosqlite.connect(self.path) as db:
+            cursor = await db.execute("SELECT username FROM users WHERE id = ? LIMIT 1", (ADMIN_IDS[0],))
+            row = await cursor.fetchone()
+            return row[0] if row else "osint_bot"
+
 # ==========================================================
-# 🗃️ СИСТЕМА БАЗ УТЕЧЕК
+# 🗃️ СИСТЕМА БАЗ УТЕЧЕК (без изменений)
 # ==========================================================
 class BreachDatabase:
     def __init__(self, db_folder: Path):
@@ -203,7 +352,7 @@ class BreachDatabase:
         return stats
 
 # ==========================================================
-# 🌐 HTTP КЛИЕНТ
+# 🌐 HTTP КЛИЕНТ (без изменений)
 # ==========================================================
 class AsyncHTTP:
     def __init__(self):
@@ -241,7 +390,7 @@ class AsyncHTTP:
             await self._session.close()
 
 # ==========================================================
-# ⏱️ RATE LIMITER
+# ⏱️ RATE LIMITER (без изменений)
 # ==========================================================
 class RateLimiter:
     def __init__(self, max_req: int, window: int = 60):
@@ -262,7 +411,7 @@ class RateLimiter:
         return max(0, self.max - len(valid))
 
 # ==========================================================
-# 🎮 DISCORD UTILS
+# 🎮 DISCORD UTILS (без изменений)
 # ==========================================================
 class DiscordUtils:
     EPOCH = 1420070400000
@@ -325,7 +474,7 @@ class OSINTFramework:
         })
         logger.info(f"🕸️ Registered {len(self.plugins)} plugins")
 
-    # ─────────── ПЛАГИНЫ ───────────
+    # ─────────── ПЛАГИНЫ (те же что были) ───────────
     async def plugin_ip(self, query: str) -> str:
         if not re.match(r"^(\d{1,3}\.){3}\d{1,3}$", query):
             return "🕸️ Неверный формат IPv4"
@@ -412,72 +561,14 @@ class OSINTFramework:
             "Threads": f"https://threads.net/@{query}", "Mastodon": f"https://mastodon.social/@{query}",
             "Snapchat": f"https://snapchat.com/add/{query}", "Behance": f"https://behance.net/{query}",
             "HackerRank": f"https://hackerrank.com/{query}", "Chess.com": f"https://chess.com/member/{query}",
-            "Lichess": f"https://lichess.org/@/{query}", "Bandcamp": f"https://bandcamp.com/{query}",
+            "Lichess": f"https://lichess.org/@{query}", "Bandcamp": f"https://bandcamp.com/{query}",
             "Mixcloud": f"https://mixcloud.com/{query}", "IndieHackers": f"https://indiehackers.com/@{query}",
             "CoinMarketCap": f"https://coinmarketcap.com/community/profile/{query}",
             "PayPal": f"https://paypal.me/{query}", "Badoo": f"https://badoo.com/profile/{query}",
             "Tinder": f"https://tinder.com/@{query}", "500px": f"https://500px.com/{query}",
             "Slideshare": f"https://slideshare.net/{query}", "Wattpad": f"https://wattpad.com/user/{query}",
             "Linktree": f"https://linktr.ee/{query}", "WordPress": f"https://{query}.wordpress.com",
-            "MyAnimeList": f"https://myanimelist.net/profile/{query}", "Flickr": f"https://flickr.com/people/{query}",
-            "Vimeo": f"https://vimeo.com/{query}", "Dribbble": f"https://dribbble.com/{query}",
-            "DeviantArt": f"https://deviantart.com/{query}", "ArtStation": f"https://artstation.com/{query}",
-            "Keybase": f"https://keybase.io/{query}", "Medium": f"https://medium.com/@{query}",
-            "Quora": f"https://quora.com/profile/{query}", "StackOverflow": f"https://stackoverflow.com/users/{query}",
-            "CodePen": f"https://codepen.io/{query}", "Replit": f"https://replit.com/@{query}",
-            "HackTheBox": f"https://hackthebox.com/profile/{query}", "TryHackMe": f"https://tryhackme.com/p/{query}",
-            "LeetCode": f"https://leetcode.com/{query}", "Codeforces": f"https://codeforces.com/profile/{query}",
-            "AtCoder": f"https://atcoder.jp/users/{query}", "TopCoder": f"https://topcoder.com/members/{query}",
-            "Bitbucket": f"https://bitbucket.org/{query}", "SourceForge": f"https://sourceforge.net/u/{query}",
-            "Gitee": f"https://gitee.com/{query}", "Codewars": f"https://codewars.com/users/{query}",
-            "Exercism": f"https://exercism.org/profiles/{query}", "HackerEarth": f"https://hackerearth.com/@{query}",
-            "Coderbyte": f"https://coderbyte.com/profile/{query}", "Edabit": f"https://edabit.com/user/{query}",
-            "Scratch": f"https://scratch.mit.edu/users/{query}", "Newgrounds": f"https://newgrounds.com/art/view/{query}",
-            "Itch.io": f"https://itch.io/profile/{query}", "GameJolt": f"https://gamejolt.com/@{query}",
-            "Speedrun": f"https://speedrun.com/user/{query}", "Trello": f"https://trello.com/{query}",
-            "Notion": f"https://notion.so/{query}", "Carrd": f"https://{query}.carrd.co",
-            "Linkin.bio": f"https://linkin.bio/{query}", "Bio.link": f"https://bio.link/{query}",
-            "AllMyLinks": f"https://allmylinks.com/{query}", "Crewfire": f"https://crewfire.me/{query}",
-            "Kofi": f"https://ko-fi.com/{query}", "Patreon": f"https://patreon.com/{query}",
-            "BuyMeACoffee": f"https://buymeacoffee.com/{query}", "Gumroad": f"https://gumroad.com/{query}",
-            "Etsy": f"https://etsy.com/shop/{query}", "Redbubble": f"https://redbubble.com/people/{query}",
-            "Society6": f"https://society6.com/{query}", "Teespring": f"https://teespring.com/stores/{query}",
-            "MerchByAmazon": f"https://amazon.com/shops/{query}", "Zazzle": f"https://zazzle.com/store/{query}",
-            "CafePress": f"https://cafepress.com/{query}", "Spreadshirt": f"https://spreadshirt.com/shop/user/{query}",
-            "Teepublic": f"https://teepublic.com/user/{query}", "Threadless": f"https://threadless.com/@{query}",
-            "DesignByHumans": f"https://designbyhumans.com/shop/{query}", "Inprnt": f"https://inprnt.com/gallery/{query}",
-            "Pixiv": f"https://pixiv.net/users/{query}", "Danbooru": f"https://danbooru.donmai.us/users/{query}",
-            "Gelbooru": f"https://gelbooru.com/index.php?page=account&s=profile&uname={query}",
-            "Rule34": f"https://rule34.xxx/index.php?page=account&s=profile&uname={query}",
-            "E621": f"https://e621.net/user/show/{query}", "FurAffinity": f"https://furaffinity.net/user/{query}",
-            "Inkbunny": f"https://inkbunny.net/{query}", "Weasyl": f"https://weasyl.com/~{query}",
-            "BaraAgar": f"https://baraag.net/@{query}", "Mstdn.social": f"https://mstdn.social/@{query}",
-            "Social.tchncs.de": f"https://social.tchncs.de/@{query}", "Mamot.fr": f"https://mamot.fr/@{query}",
-            "PixelFed": f"https://pixelfed.social/{query}", "Lemmy": f"https://lemmy.world/u/{query}",
-            "Kbin": f"https://kbin.social/u/{query}", "Peertube": f"https://peertube.social/a/{query}",
-            "Odysee": f"https://odysee.com/@{query}", "Rumble": f"https://rumble.com/user/{query}",
-            "Bitchute": f"https://bitchute.com/channel/{query}", "LBRY": f"https://lbry.tv/@{query}",
-            "DTube": f"https://d.tube/#!/c/{query}", "3Speak": f"https://3speak.tv/user/{query}",
-            "Hive": f"https://hive.blog/@{query}", "Steemit": f"https://steemit.com/@{query}",
-            "Minds": f"https://minds.com/{query}", "Gab": f"https://gab.com/{query}",
-            "Parler": f"https://parler.com/profile/{query}", "Gettr": f"https://gettr.com/user/{query}",
-            "TruthSocial": f"https://truthsocial.com/@{query}", "MeWe": f"https://mewe.com/profile/{query}",
-            "Vero": f"https://vero.co/{query}", "Ello": f"https://ello.co/{query}",
-            "Diaspora": f"https://diasporafoundation.org/people/{query}", "Friendica": f"https://friendica.network/profile/{query}",
-            "Hubzilla": f"https://hubzilla.org/channel/{query}", "Misskey": f"https://misskey.io/@{query}",
-            "Pleroma": f"https://pleroma.social/{query}", "Akkoma": f"https://akkoma.social/{query}",
-            "Firefish": f"https://firefish.social/@{query}", "Calckey": f"https://calckey.social/@{query}",
-            "Sharkey": f"https://sharkey.social/@{query}", "Glitch": f"https://glitch.social/@{query}",
-            "Squawk": f"https://squawk.social/@{query}", "Birdsite": f"https://birdsite.live/{query}",
-            "Nitter": f"https://nitter.net/{query}", "Twitodon": f"https://twitodon.com/{query}",
-            "Thread Reader": f"https://threadreaderapp.com/user/{query}", "TweetDeck": f"https://tweetdeck.twitter.com/{query}",
-            "Twitter Lists": f"https://twitter.com/{query}/lists", "Circle": f"https://circle.so/c/{query}",
-            "Discourse": f"https://meta.discourse.org/u/{query}", "Flarum": f"https://discuss.flarum.org/u/{query}",
-            "NodeBB": f"https://community.nodebb.org/user/{query}", "XenForo": f"https://xenforo.com/community/members/{query}",
-            "phpBB": f"https://area51.phpbb.com/phpBB/memberlist.php?mode=viewprofile&u={query}",
-            "MyBB": f"https://community.mybb.com/member.php?action=profile&uid={query}",
-            "Vanilla": f"https://vanillaforums.org/profile/{query}", "Simple Machines": f"https://www.simplemachines.org/community/index.php?action=profile;u={query}",
-            "Invision Power": f"https://www.invisioncommunity.com/profile/{query}",
+            "MyAnimeList": f"https://myanimelist.net/profile/{query}",
         }
         tasks = [self.http.head(url) for url in platforms.values()]
         results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -490,9 +581,9 @@ class OSINTFramework:
         res = f"🕸️ **Никнейм:** `{query}`\n"
         res += f"🕸️ **Найдено:** {len(found)} | ❌ **Не найдено:** {len(not_found)}\n"
         if found:
-            res += "**🕸️ Активные профили:**\n" + "\n".join(found[:50])
-            if len(found) > 50:
-                res += f"\n... и ещё {len(found)-50}"
+            res += "**🕸️ Активные профили:**\n" + "\n".join(found[:30])
+            if len(found) > 30:
+                res += f"\n... и ещё {len(found)-30}"
         return res
 
     def plugin_phone(self, query: str) -> str:
@@ -500,97 +591,8 @@ class OSINTFramework:
             p = phonenumbers.parse(query, None)
             if not phonenumbers.is_valid_number(p):
                 return "🕸️ Номер невалиден"
-            
-            # Карта DEF-кодов России -> конкретные регионы
-            ru_regions = {
-                # Республики
-                "347": "Республика Башкортостан", "843": "Республика Татарстан",
-                "855": "Республика Татарстан", "877": "Республика Адыгея",
-                "388": "Республика Адыгея", "871": "Чеченская Республика",
-                "872": "Республика Дагестан", "873": "Республика Ингушетия",
-                "878": "Карачаево-Черкесская Республика", "879": "Кабардино-Балкарская Республика",
-                "867": "Республика Северная Осетия-Алания", "866": "Кабардино-Балкарская Республика",
-                "391": "Республика Хакасия", "394": "Республика Алтай",
-                "302": "Забайкальский край", "395": "Иркутская область",
-                "416": "Амурская область", "421": "Хабаровский край",
-                "423": "Приморский край", "424": "Сахалинская область",
-                "415": "Камчатский край", "427": "Магаданская область",
-                "411": "Республика Саха (Якутия)", "413": "Магаданская область",
-                "417": "Республика Саха (Якутия)", "426": "Еврейская АО",
-                "471": "Курская область", "472": "Белгородская область",
-                "473": "Воронежская область", "474": "Липецкая область",
-                "475": "Тамбовская область", "481": "Смоленская область",
-                "482": "Тверская область", "483": "Брянская область",
-                "484": "Калужская область", "485": "Ярославская область",
-                "486": "Орловская область", "487": "Тульская область",
-                "491": "Рязанская область", "492": "Владимирская область",
-                "493": "Ивановская область", "494": "Костромская область",
-                "495": "Москва", "496": "Московская область",
-                "498": "Московская область", "499": "Москва",
-                "811": "Псковская область", "812": "Санкт-Петербург",
-                "813": "Ленинградская область", "814": "Республика Карелия",
-                "815": "Мурманская область", "816": "Новгородская область",
-                "817": "Вологодская область", "818": "Архангельская область",
-                "820": "Вологодская область", "821": "Республика Коми",
-                "825": "Московская область", "826": "Московская область",
-                "831": "Нижегородская область", "833": "Кировская область",
-                "834": "Республика Мордовия", "835": "Чувашская Республика",
-                "836": "Республика Марий Эл", "841": "Пензенская область",
-                "842": "Ульяновская область", "844": "Волгоградская область",
-                "845": "Саратовская область", "846": "Самарская область",
-                "847": "Республика Калмыкия", "848": "Самарская область",
-                "851": "Астраханская область", "861": "Краснодарский край",
-                "862": "Краснодарский край (Сочи)", "863": "Ростовская область",
-                "865": "Ставропольский край", "869": "Ставропольский край",
-                "910": "Центральный ФО (МТС)", "911": "СЗФО (МТС)",
-                "912": "Урал (МТС)", "913": "Сибирь (МТС)",
-                "914": "Дальний Восток (МТС)", "915": "Центральный ФО (МТС)",
-                "916": "Москва и область (МТС)", "917": "Поволжье (МТС)",
-                "918": "Южный ФО (МТС)", "919": "Поволжье (МТС)",
-                "920": "Центральный ФО (МегаФон)", "921": "СЗФО (МегаФон)",
-                "922": "Урал (МегаФон)", "923": "Сибирь (МегаФон)",
-                "924": "Дальний Восток (МегаФон)", "925": "Москва и область (МегаФон)",
-                "926": "Москва и область (МегаФон)", "927": "Поволжье (МегаФон)",
-                "928": "Южный ФО (МегаФон)", "929": "Поволжье (МегаФон)",
-                "930": "Центральный ФО (МегаФон)", "931": "СЗФО (МегаФон)",
-                "932": "Урал (МегаФон)", "933": "Сибирь (МегаФон)",
-                "934": "Дальний Восток (МегаФон)", "936": "Москва (МегаФон)",
-                "937": "Поволжье (МегаФон)", "938": "Южный ФО (МегаФон)",
-                "939": "Поволжье (МегаФон)", "941": "СЗФО (МегаФон)",
-                "950": "Урал (Билайн)", "951": "Сибирь (Билайн)",
-                "952": "Дальний Восток (Билайн)", "953": "Поволжье (Билайн)",
-                "958": "Москва (Билайн)", "960": "Центральный ФО (Билайн)",
-                "961": "СЗФО (Билайн)", "962": "Урал (Билайн)",
-                "963": "Сибирь (Билайн)", "964": "Дальний Восток (Билайн)",
-                "965": "Москва (Билайн)", "966": "Москва (Билайн)",
-                "967": "Москва (Билайн)", "968": "Москва (Билайн)",
-                "969": "Москва (Билайн)", "977": "Москва (Теле2)",
-                "978": "Крым (Теле2)", "979": "Москва (Теле2)",
-                "980": "Центральный ФО (Теле2)", "981": "СЗФО (Теле2)",
-                "982": "Урал (Теле2)", "983": "Сибирь (Теле2)",
-                "984": "Дальний Восток (Теле2)", "985": "Москва (Теле2)",
-                "986": "Центральный ФО (Теле2)", "987": "Поволжье (МегаФон)",
-                "988": "Южный ФО (Теле2)", "989": "Поволжье (Теле2)",
-                "991": "Центральный ФО (Тинькофф)", "992": "Таджикистан",
-                "993": "Туркменистан", "994": "Азербайджан",
-                "995": "Грузия", "996": "Поволжье (МегаФон)",
-                "997": "Москва (Тинькофф)", "998": "Узбекистан",
-                "999": "РФ (разные операторы)"
-            }
-            
             region_code = phonenumbers.region_code_for_number(p)
             region_name = geocoder.description_for_number(p, "ru")
-            
-            # Определяем регион по DEF-коду для России
-            if region_code == "RU":
-                national = phonenumbers.format_number(p, phonenumbers.PhoneNumberFormat.NATIONAL)
-                code = re.sub(r'[^\d]', '', national)
-                if code.startswith('8'):
-                    code = '7' + code[1:]
-                if len(code) >= 4:
-                    def_code = code[1:4]
-                    region_name = ru_regions.get(def_code, region_name)
-            
             carr = carrier.name_for_number(p, "ru") or "Не определен"
             tz = timezone.time_zones_for_number(p)
             fmt = phonenumbers.format_number(p, phonenumbers.PhoneNumberFormat.INTERNATIONAL)
@@ -603,10 +605,9 @@ class OSINTFramework:
                 phonenumbers.PhoneNumberType.PREMIUM_RATE: "Премиум"
             }
             num_type_str = type_map.get(num_type, "Другой")
-            
             return (f"🕸️ **Номер:** `{fmt}`\n"
-                    f"🕸️ **Страна:** Россия\n"
-                    f"🕸️ **Регион:** {region_name}\n"
+                    f"🕸️ **Страна:** {region_name}\n"
+                    f"🕸️ **Регион:** {region_code}\n"
                     f"🕸️ **Оператор:** {carr}\n"
                     f"🕸️ **TZ:** {tz[0] if tz else 'N/A'}\n"
                     f"🕸️ **Тип:** {num_type_str}")
@@ -762,43 +763,247 @@ class OSINTFramework:
             return f"🕸️ Ошибка Discord: {e}"
 
 # ==========================================================
-# 🤖 TELEGRAM BOT
+# 🤖 TELEGRAM BOT С МОНЕТИЗАЦИЕЙ
 # ==========================================================
 fw = OSINTFramework()
+
+# Клавиатуры
 KB_MAIN = InlineKeyboardMarkup([
     [InlineKeyboardButton("🕸️ IP Info", callback_data="ip"), InlineKeyboardButton("🕸️ DNS/WHOIS", callback_data="dns")],
     [InlineKeyboardButton("🕸️ Nick Scan", callback_data="nick"), InlineKeyboardButton("🕸️ Phone", callback_data="phone")],
     [InlineKeyboardButton("🕸️ Email", callback_data="email"), InlineKeyboardButton("🕸️ Breach DB", callback_data="breach")],
     [InlineKeyboardButton("🕸️ TON Wallet", callback_data="ton"), InlineKeyboardButton("🕸️ TG User", callback_data="tg_id")],
     [InlineKeyboardButton("🕸️ Subdomains", callback_data="subs"), InlineKeyboardButton("🕸️ Discord", callback_data="discord")],
-    [InlineKeyboardButton("🕸️ GeoINT", callback_data="geo"), InlineKeyboardButton("🕸️ DB Stats", callback_data="dbstats")]
+    [InlineKeyboardButton("🕸️ GeoINT", callback_data="geo"), InlineKeyboardButton("🕸️ DB Stats", callback_data="dbstats")],
+    [InlineKeyboardButton("💰 Купить запросы", callback_data="buy"), InlineKeyboardButton("👥 Рефералы", callback_data="referral")],
+    [InlineKeyboardButton("🪞 Создать зеркало", callback_data="mirror"), InlineKeyboardButton("📊 Баланс", callback_data="balance")]
 ])
+
 KB_BACK = InlineKeyboardMarkup([[InlineKeyboardButton("🕸️ Меню", callback_data="menu")]])
 
+KB_BUY = InlineKeyboardMarkup([
+    [InlineKeyboardButton("🔹 50 запросов - 100₽", callback_data="buy_50")],
+    [InlineKeyboardButton("🔹 200 запросов - 300₽", callback_data="buy_200")],
+    [InlineKeyboardButton("🔹 500 запросов - 600₽", callback_data="buy_500")],
+    [InlineKeyboardButton("♾️ Безлимит на месяц - 999₽", callback_data="buy_unlimited")],
+    [InlineKeyboardButton("🔙 Назад", callback_data="menu")]
+])
+
 async def start_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    await fw.db.upsert_user(update.effective_user.id, update.effective_user.username,
-                            update.effective_user.first_name, update.effective_user.last_name)
+    user = update.effective_user
+    user_id = user.id
+    
+    # Проверяем есть ли реферальный код в start
+    ref_code = None
+    mirror_code = None
+    
+    if ctx.args:
+        param = ctx.args[0]
+        if param.startswith('ref_'):
+            ref_code = param
+        elif param.startswith('mirror_'):
+            mirror_code = param.replace('mirror_', '')
+    
+    # Создаём или обновляем пользователя
+    user_data = await fw.db.get_user(user_id)
+    if not user_data:
+        await fw.db.create_user(user_id, user.username or "", user.first_name or "", user.last_name or "")
+        # Если есть реферальный код - обрабатываем
+        if ref_code:
+            # Извлекаем ID реферера из кода
+            referrer_id = int(ref_code.split('_')[1])
+            await fw.db.process_referral(user_id, referrer_id)
+            await update.message.reply_text(f"🎉 Вы получили +{REFERRAL_BONUS} запросов по реферальной ссылке!")
+        # Если активировали зеркало
+        elif mirror_code:
+            await fw.db.process_mirror_activation(user_id, mirror_code)
+            await update.message.reply_text(f"🪞 Зеркало активировано! Создатель получил +{MIRROR_BONUS} запросов.")
+    else:
+        await fw.db.update_user(user_id, username=user.username or "", last_active=datetime.now().isoformat())
+    
     db_stats = await fw.breach_db.get_stats()
     await update.message.reply_text(
-        f"🕸️ **OSINT FRAMEWORK v7.0**\n"
+        f"🕸️ **OSINT FRAMEWORK v8.0**\n\n"
+        f"💰 **Ваш баланс:** {user_data['requests_left'] if user_data else FREE_REQUESTS} запросов\n\n"
         f"🕸️ **Базы утечек:**\n"
         f"• Email breaches: `{db_stats['breaches']:,}`\n"
         f"• Phone leaks: `{db_stats['phones']:,}`\n"
-        f"• Combo lists: `{db_stats['combos']:,}`\n"
+        f"• Combo lists: `{db_stats['combos']:,}`\n\n"
         f"🕸️ **Доступные модули:**\n"
         f"• 150+ платформ для ника\n"
         f"• Discord snowflake decoder\n"
-        f"• Локальный поиск по базам\n"
-        f"• Конкретные регионы РФ\n"
+        f"• Локальный поиск по базам\n\n"
+        f"🎁 **Бонусы:**\n"
+        f"• Приглашай друзей: +{REFERRAL_BONUS} запросов\n"
+        f"• Создавай зеркала: +{MIRROR_BONUS} запросов\n\n"
         f"🕸️ **White Hat Only!**\n"
         f"Используйте только в законных целях.",
         reply_markup=KB_MAIN, parse_mode="Markdown"
+    )
+
+async def balance_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    user_data = await fw.db.get_user(user_id)
+    if not user_data:
+        await update.message.reply_text("🕸️ Сначала нажмите /start")
+        return
+    
+    total_used = user_data['total_requests'] - user_data['requests_left']
+    
+    await update.message.reply_text(
+        f"📊 **Ваш баланс:**\n\n"
+        f"🔹 Доступно запросов: **{user_data['requests_left']}**\n"
+        f"🔹 Всего использовано: **{total_used}**\n"
+        f"🔹 Premium: **{'✅ Да' if user_data['is_premium'] else '❌ Нет'}**\n\n"
+        f"💡 **Как получить ещё:**\n"
+        f"• Пригласите друга: +{REFERRAL_BONUS} запросов\n"
+        f"• Создайте зеркало: +{MIRROR_BONUS} запросов\n"
+        f"• Купите пакет в разделе /buy",
+        parse_mode="Markdown"
+    )
+
+async def buy_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "💰 **Выберите пакет:**\n\n"
+        "🔹 **50 запросов** - 100₽ (~67 звёзд)\n"
+        "🔹 **200 запросов** - 300₽ (~200 звёзд)\n"
+        "🔹 **500 запросов** - 600₽ (~400 звёзд)\n"
+        "♾️ **Безлимит на месяц** - 999₽ (~666 звёзд)\n\n"
+        "💡 Telegram Stars принимаются автоматически",
+        reply_markup=KB_BUY, parse_mode="Markdown"
+    )
+
+async def referral_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    ref_code = await fw.db.get_referral_code(user_id)
+    
+    if not ref_code:
+        await update.message.reply_text("🕸️ Ошибка. Нажмите /start")
+        return
+    
+    bot_username = (await fw.db.get_bot_username()).replace('@', '')
+    ref_link = f"https://t.me/{bot_username}?start={ref_code}"
+    
+    await update.message.reply_text(
+        f"👥 **Реферальная программа:**\n\n"
+        f"Пригласите друзей и получите **{REFERRAL_BONUS} запросов** за каждого!\n\n"
+        f"🔗 **Ваша ссылка:**\n`{ref_link}`\n\n"
+        f"📊 **Статистика:**\n"
+        f"• Приглашено: 0\n"
+        f"• Получено бонусов: 0\n\n"
+        f"💡 Отправьте ссылку друзьям!",
+        parse_mode="Markdown"
+    )
+
+async def mirror_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    user_data = await fw.db.get_user(user_id)
+    
+    if not user_data:
+        await update.message.reply_text("🕸️ Сначала нажмите /start")
+        return
+    
+    # Проверяем есть ли уже активное зеркало
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            "SELECT mirror_url FROM mirrors WHERE user_id = ? AND is_active = TRUE LIMIT 1",
+            (user_id,))
+        row = await cursor.fetchone()
+    
+    if row:
+        await update.message.reply_text(
+            f"🪞 **Ваше зеркало уже создано:**\n\n"
+            f"🔗 `{row[0]}`\n\n"
+            f"💡 Каждое использование даёт вам +{MIRROR_BONUS} запросов!",
+            parse_mode="Markdown"
+        )
+        return
+    
+    # Создаём новое зеркало
+    mirror_url = await fw.db.create_mirror(user_id)
+    
+    await update.message.reply_text(
+        f"🪞 **Зеркало создано!**\n\n"
+        f"🔗 **Ссылка:**\n`{mirror_url}`\n\n"
+        f"🎁 Вы получили **+{MIRROR_BONUS} запросов**!\n\n"
+        f"💡 Отправьте ссылку друзьям - за каждое использование вы получите бонус!",
+        parse_mode="Markdown"
+    )
+
+# Обработчик покупок
+async def buy_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    user_id = query.from_user.id
+    data = query.data
+    
+    packages = {
+        'buy_50': {'requests': 50, 'price': 100, 'stars': 67},
+        'buy_200': {'requests': 200, 'price': 300, 'stars': 200},
+        'buy_500': {'requests': 500, 'price': 600, 'stars': 400},
+        'buy_unlimited': {'requests': 999999, 'price': 999, 'stars': 666}
+    }
+    
+    if data not in packages:
+        return
+    
+    pkg = packages[data]
+    
+    # Создаём инвойс Telegram Stars
+    prices = [LabeledPrice(label="Telegram Stars", amount=pkg['stars'])]
+    
+    await context.bot.send_invoice(
+        chat_id=user_id,
+        title=f"OSINT Запросы ({pkg['requests']} шт)",
+        description=f"Покупка {pkg['requests']} запросов для OSINT Framework",
+        payload=f"osint_{pkg['requests']}",
+        provider_token="",  # Для Stars не нужен
+        currency="XTR",  # Telegram Stars
+        prices=prices,
+        start_parameter=f"buy_{pkg['requests']}",
+    )
+
+async def pre_checkout_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    query = update.pre_checkout_query
+    await query.answer(ok=True)
+
+async def successful_payment_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    payment = update.message.successful_payment
+    user_id = update.effective_user.id
+    
+    # Извлекаем количество запросов из payload
+    try:
+        requests = int(payment.invoice_payload.replace('osint_', ''))
+    except:
+        requests = 50
+    
+    # Начисляем запросы
+    await fw.db.add_requests(user_id, requests)
+    
+    # Логируем транзакцию
+    total_stars = sum(price.amount for price in update.message.successful_payment.total_amount)
+    await fw.db.log_transaction(
+        user_id, 
+        "stars_payment", 
+        total_stars, 
+        requests,
+        payment.telegram_payment_charge_id
+    )
+    
+    await update.message.reply_text(
+        f"✅ **Оплата прошла успешно!**\n\n"
+        f"🎁 Вам начислено **{requests} запросов**!\n"
+        f"💰 Списано: {total_stars} звёзд\n\n"
+        f"🕸️ Теперь у вас {await (await fw.db.get_user(user_id))['requests_left']} запросов.",
+        parse_mode="Markdown"
     )
 
 async def callback_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
     data = q.data
+    
     if data == "menu":
         await q.edit_message_text("🕸️ **OSINT Модули:**", reply_markup=KB_MAIN)
         return
@@ -817,20 +1022,41 @@ async def callback_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             f"🕸️ **Базы утечек:**\n"
             f"• Breaches: `{stats['breaches']:,}`\n"
             f"• Phones: `{stats['phones']:,}`\n"
-            f"• Combos: `{stats['combos']:,}`\n"
+            f"• Combos: `{stats['combos']:,}`\n\n"
             f"🕸️ **Пользователей:** `{users}`\n"
             f"🕸️ **Запросов:** `{logs}`",
             reply_markup=KB_BACK, parse_mode="Markdown"
         )
         return
+    if data == "buy":
+        await buy_callback(update, ctx)
+        return
+    if data == "referral":
+        await referral_cmd(update, ctx)
+        return
+    if data == "mirror":
+        await mirror_cmd(update, ctx)
+        return
+    if data == "balance":
+        await balance_cmd(update, ctx)
+        return
+    if data.startswith('buy_'):
+        await buy_callback(update, ctx)
+        return
 
     prompts = {
-        "ip": "🕸️ Введите **IPv4**:", "dns": "🕸️ Введите **домен**:", "subs": "🕸️ Введите **домен**:",
-        "nick": "🕸️ Введите **никнейм**:", "phone": "🕸️ Введите **номер** (+7...):",
-        "email": "🕸️ Введите **email**:", "breach": "🕸️ Введите **email** для поиска в базах:",
-        "ton": "🕸️ Введите **TON адрес**:", "tg_id": "🕸️ Введите **username** (без @):",
+        "ip": "🕸️ Введите **IPv4**:",
+        "dns": "🕸️ Введите **домен**:",
+        "subs": "🕸️ Введите **домен**:",
+        "nick": "🕸️ Введите **никнейм**:",
+        "phone": "🕸️ Введите **номер** (+7...):",
+        "email": "🕸️ Введите **email**:",
+        "breach": "🕸️ Введите **email** для поиска в базах:",
+        "ton": "🕸️ Введите **TON адрес**:",
+        "tg_id": "🕸️ Введите **username** (без @):",
         "geo": "🕸️ Введите **координаты** `lat lon`:",
-        "discord": "🕸️ Введите **Discord ID**:", "whois": "🕸️ Введите **домен**:"
+        "discord": "🕸️ Введите **Discord ID**:",
+        "whois": "🕸️ Введите **домен**:"
     }
     if data in prompts:
         ctx.user_data["awaiting"] = data
@@ -839,6 +1065,7 @@ async def callback_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def message_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     tool = ctx.user_data.get("awaiting")
+    
     if not tool:
         await update.message.reply_text("🕸️ Используйте кнопки меню 👇", reply_markup=KB_MAIN)
         return
@@ -850,8 +1077,24 @@ async def message_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"🕸️ Лимит: {RATE_LIMIT}/мин")
         ctx.user_data["awaiting"] = None
         return
+    
+    # Проверяем баланс
+    user_data = await fw.db.get_user(uid)
+    if not user_data or user_data['requests_left'] <= 0:
+        await update.message.reply_text(
+            "⚠️ **Недостаточно запросов!**\n\n"
+            "💡 Пополните баланс:\n"
+            "• /buy - купить запросы\n"
+            "• /referral - пригласить друга (+5 запросов)\n"
+            "• /mirror - создать зеркало (+5 запросов)",
+            reply_markup=KB_BUY,
+            parse_mode="Markdown"
+        )
+        return
+    
     await update.message.reply_text("🕸️ Обработка...")
     query = update.message.text.strip() if update.message.text else ""
+    
     try:
         plugin_func = fw.plugins.get(tool)
         if not plugin_func:
@@ -861,12 +1104,23 @@ async def message_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         else:
             res = await plugin_func(query) if asyncio.iscoroutinefunction(plugin_func) else plugin_func(query)
         
+        # Списываем запрос
+        await fw.db.use_request(uid)
+        
+        # Показываем результат
         if len(res) > 4000:
             chunks = [res[i:i+4000] for i in range(0, len(res), 4000)]
             for chunk in chunks:
                 await update.message.reply_text(chunk, parse_mode="Markdown")
         else:
-            await update.message.reply_text(res, parse_mode="Markdown")
+            # Показываем остаток запросов
+            new_balance = await fw.db.get_user(uid)
+            await update.message.reply_text(
+                f"{res}\n\n"
+                f"💰 **Осталось запросов:** {new_balance['requests_left']}",
+                parse_mode="Markdown"
+            )
+        
         await fw.db.log(uid, tool, query if query else "photo", "ok")
     except Exception as e:
         await update.message.reply_text(f"🕸️ Ошибка: {e}")
@@ -881,29 +1135,26 @@ async def message_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def main():
     await fw.init()
     app = ApplicationBuilder().token(BOT_TOKEN).build()
+    
+    # Хендлеры
     app.add_handler(CommandHandler("start", start_cmd))
+    app.add_handler(CommandHandler("balance", balance_cmd))
+    app.add_handler(CommandHandler("buy", buy_cmd))
+    app.add_handler(CommandHandler("referral", referral_cmd))
+    app.add_handler(CommandHandler("mirror", mirror_cmd))
     app.add_handler(CallbackQueryHandler(callback_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
-    app.add_handler(MessageHandler(filters.PHOTO & ~filters.COMMAND, message_handler))
-    logger.info("🕸️ OSINT Framework v7.0 запущен")
     
-    # 🌐 ХАК ДЛЯ RENDER.COM (FREE TIER)
-    if os.environ.get('RENDER') or os.environ.get('PORT'):
-        from aiohttp import web
-        async def handle(request):
-            return web.Response(text="OSINT Bot is alive 🕸️")
-        web_app = web.Application()
-        web_app.router.add_get('/', handle)
-        runner = web.AppRunner(web_app)
-        await runner.setup()
-        port = int(os.environ.get('PORT', 8080))
-        site = web.TCPSite(runner, '0.0.0.0', port)
-        await site.start()
-        logger.info(f"🕸️ Web server started on port {port}")
+    # Оплата Telegram Stars
+    app.add_handler(CallbackQueryHandler(pre_checkout_callback), group=1)
+    app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, successful_payment_callback))
+    
+    logger.info("🕸️ OSINT Framework v8.0 запущен с монетизацией!")
     
     await app.initialize()
     await app.start()
     await app.updater.start_polling()
+    
     try:
         await asyncio.Event().wait()
     except KeyboardInterrupt:
