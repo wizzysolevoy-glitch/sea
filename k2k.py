@@ -19,7 +19,6 @@ from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandle
 import aiohttp
 import phonenumbers
 from phonenumbers import geocoder, carrier, timezone
-from PIL import Image
 import aiosqlite
 
 # ==========================================================
