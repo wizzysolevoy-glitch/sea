@@ -28,7 +28,6 @@ from dataclasses import dataclass, field
 from enum import Enum, auto
 from collections import defaultdict
 from functools import wraps
-
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
 from telegram.error import BadRequest, Forbidden, NetworkError, TelegramError, TimedOut
@@ -290,7 +289,7 @@ class BotDatabase:
             await db.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('welcome_message', 'Добро пожаловать в OSINT Framework!')")
             await db.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('rate_limit_per_minute', '100')")
             await db.commit()
-        logger.info("️ Database schema initialized successfully")
+            logger.info("️ Database schema initialized successfully")
 
     async def get_user(self, user_id: int) -> Optional[dict]:
         async with aiosqlite.connect(self.path) as db:
@@ -817,6 +816,7 @@ class OSINTFramework:
             "exif": self.plugin_exif
         }
 
+    # ─────────── ПЛАГИНЫ ───────────
     async def plugin_ip(self, query: str) -> str:
         start_time = time.time()
         try:
@@ -828,13 +828,15 @@ class OSINTFramework:
             data = await self.http.get_json(f"http://ip-api.com/json/{query}?fields=4194303")
             if data.get("status") == "fail": return f"🕸️ Ошибка API: {data.get('message', 'Unknown')}"
             lat, lon = data.get('lat', 0), data.get('lon', 0)
-            res = (f"🕸️ **IP:** `{data['query']}`\n"
-                   f"🕸️ **Страна:** {data.get('country')} ({data.get('countryCode')})\n"
-                   f"🕸️ **Регион:** {data.get('regionName')}\n"
-                   f"🕸️ **Город:** {data.get('city')}\n"
-                   f"🕸️ **Координаты:** `{lat}, {lon}`\n"
-                   f"🕸️ **ISP:** `{data.get('isp')}`\n"
-                   f"🕸️ **Proxy/VPN:** {'✅' if data.get('proxy') else '❌'}")
+            res = (
+                f"🕸️ **IP:** `{data['query']}`\n"
+                f"🕸️ **Страна:** {data.get('country')} ({data.get('countryCode')})\n"
+                f"🕸️ **Регион:** {data.get('regionName')}\n"
+                f"🕸️ **Город:** {data.get('city')}\n"
+                f"🕸️ **Координаты:** `{lat}, {lon}`\n"
+                f"🕸️ **ISP:** `{data.get('isp')}`\n"
+                f"🕸️ **Proxy/VPN:** {'✅' if data.get('proxy') else '❌'}"
+            )
             await self.db.set_cache(f"ip:{query}", res, 3600)
             await self.db.log(0, "ip", query, "ok", time.time() - start_time)
             return res
@@ -889,7 +891,6 @@ class OSINTFramework:
         query = query.strip().lower()
         if not query or len(query) < 2:
             return "🕸️ Введите корректный никнейм (минимум 2 символа)"
-
         platforms = {
             "VK": f"https://vk.com/{query}", "Telegram": f"https://t.me/{query}",
             "Instagram": f"https://instagram.com/{query}", "Twitter/X": f"https://twitter.com/{query}",
@@ -931,7 +932,6 @@ class OSINTFramework:
             "Fundrazr": f"https://fundrazr.com/{query}", "GoFundMe": f"https://www.gofundme.com/f/{query}",
             "Kickstarter": f"https://www.kickstarter.com/profile/{query}", "Indiegogo": f"https://www.indiegogo.com/individual/{query}"
         }
-
         found, not_found, errors = [], 0, 0
         platform_list = list(platforms.items())
         semaphore = asyncio.Semaphore(10)  # Ограничение параллельных запросов
@@ -957,9 +957,11 @@ class OSINTFramework:
                 else: errors += 1
             await asyncio.sleep(0.3)  # Задержка между пакетами
 
-        res = f"🕸️ **Никнейм:** `{query}`\n"
-        res += f"🕸️ **Найдено:** {len(found)}/{len(platforms)}\n"
-        res += f"🕸️ **Не найдено:** {not_found}\n"
+        res = (
+            f"🕸️ **Никнейм:** `{query}`\n"
+            f"🕸️ **Найдено:** {len(found)}/{len(platforms)}\n"
+            f"🕸️ **Не найдено:** {not_found}\n"
+        )
         if errors: res += f"️ **Ошибок/таймаутов:** {errors}\n"
         if found:
             res += "\n**🕸️ Активные профили:**\n" + "\n".join(found[:80])
@@ -980,11 +982,13 @@ class OSINTFramework:
             fmt = phonenumbers.format_number(p, phonenumbers.PhoneNumberFormat.INTERNATIONAL)
             num_type = phonenumbers.number_type(p)
             type_map = {phonenumbers.PhoneNumberType.MOBILE: "Мобильный", phonenumbers.PhoneNumberType.FIXED_LINE: "Городской"}
-            res = (f"🕸️ **Номер:** `{fmt}`\n"
-                   f"🕸️ **Страна/Регион:** {region_name}\n"
-                   f"🕸️ **Оператор:** {carr}\n"
-                   f"🕸️ **Часовой пояс:** {tz_list[0] if tz_list else 'N/A'}\n"
-                   f"🕸️ **Тип:** {type_map.get(num_type, 'Другой')}")
+            res = (
+                f"🕸️ **Номер:** `{fmt}`\n"
+                f"🕸️ **Страна/Регион:** {region_name}\n"
+                f"🕸️ **Оператор:** {carr}\n"
+                f"🕸️ **Часовой пояс:** {tz_list[0] if tz_list else 'N/A'}\n"
+                f"🕸️ **Тип:** {type_map.get(num_type, 'Другой')}"
+            )
             return res
         except Exception as e:
             return f"🕸️ Ошибка: {str(e)}. Формат: +79991234567"
@@ -994,7 +998,7 @@ class OSINTFramework:
         if not self.security.validate_email(query): return "🕸️ Неверный формат email"
         domain = query.split("@")[1]
         temp_domains = ["tempmail.com", "guerrillamail.com", "mailinator.com", "yopmail.com"]
-        warn = "🕸️ **⚠️ ВРЕМЕННЫЙ ДОМЕН!**" if domain.lower() in temp_domains else "🕸️ Домен надёжный"
+        warn = "🕸️ **️ ВРЕМЕННЫЙ ДОМЕН!**" if domain.lower() in temp_domains else "🕸️ Домен надёжный"
         return f"️ **Email:** `{query}`\n️ Домен: `{domain}`\n{warn}"
 
     async def plugin_breach(self, query: str) -> str:
@@ -1006,7 +1010,11 @@ class OSINTFramework:
         for r in results:
             src = r.get("source", "Unknown")
             sources.setdefault(src, []).append(r)
-        res = f"️ **Email:** `{query}`\n️ **Найдено утечек:** {len(results)}\n🕸️ **Источников:** {len(sources)}\n"
+        res = (
+            f"️ **Email:** `{query}`\n"
+            f"️ **Найдено утечек:** {len(results)}\n"
+            f"🕸️ **Источников:** {len(sources)}\n"
+        )
         for source, breaches in list(sources.items())[:5]:
             res += f"🕸️ **{source}** ({len(breaches)} записей):\n"
             for b in breaches[:3]:
@@ -1023,7 +1031,11 @@ class OSINTFramework:
             if data.get("ok"):
                 bal = int(data["result"].get("balance", 0)) / 1e9
                 is_wallet = "b5ee9c72" in data["result"].get("code", "")
-                res = f"️ **TON:** `{query}`\n️ **Баланс:** `{bal:.4f} TON`\n🕸️ **Тип:** {'Кошелёк' if is_wallet else 'Обычный адрес'}"
+                res = (
+                    f"️ **TON:** `{query}`\n"
+                    f"️ **Баланс:** `{bal:.4f} TON`\n"
+                    f"🕸️ **Тип:** {'Кошелёк' if is_wallet else 'Обычный адрес'}"
+                )
                 await self.db.set_cache(f"ton:{query}", res, 60)
                 return res
             return "🕸️ Адрес не найден"
@@ -1035,11 +1047,13 @@ class OSINTFramework:
         if not clean: return "🕸️ Введите username"
         try:
             chat = await bot.get_chat(f"@{clean}")
-            return (f"🕸️ **Telegram:** `{clean}`\n"
-                    f"🕸️ **ID:** `{chat.id}`\n"
-                    f"🕸️ **Имя:** {chat.first_name or ''} {chat.last_name or ''}\n"
-                    f"🕸️ **Username:** @{chat.username or 'N/A'}\n"
-                    f"️ **Бот:** {'✅ Да' if chat.is_bot else '❌ Нет'}")
+            return (
+                f"🕸️ **Telegram:** `{clean}`\n"
+                f"🕸️ **ID:** `{chat.id}`\n"
+                f"🕸️ **Имя:** {chat.first_name or ''} {chat.last_name or ''}\n"
+                f"🕸️ **Username:** @{chat.username or 'N/A'}\n"
+                f"️ **Бот:** {'✅ Да' if chat.is_bot else '❌ Нет'}"
+            )
         except Exception:
             return f"🕸️ **Telegram:** `{clean}`\n🕸️ Пользователь не найден ботом или аккаунт приватный."
 
@@ -1049,10 +1063,12 @@ class OSINTFramework:
         try:
             data = await self.http.get_json(f"https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat={parts[0]}&lon={parts[1]}")
             addr = data.get("address", {})
-            return (f"🕸️ **Координаты:** `{parts[0]}, {parts[1]}`\n"
-                    f"🕸️ **Адрес:** `{data.get('display_name', 'Не найден')}`\n"
-                    f"🕸️ Город: {addr.get('city', addr.get('town', 'N/A'))}\n"
-                    f"🕸️ Страна: {addr.get('country', 'N/A')}")
+            return (
+                f"🕸️ **Координаты:** `{parts[0]}, {parts[1]}`\n"
+                f"🕸️ **Адрес:** `{data.get('display_name', 'Не найден')}`\n"
+                f"🕸️ Город: {addr.get('city', addr.get('town', 'N/A'))}\n"
+                f"🕸️ Страна: {addr.get('country', 'N/A')}"
+            )
         except Exception as e:
             return f"🕸️ Ошибка гео: {str(e)}"
 
@@ -1062,11 +1078,13 @@ class OSINTFramework:
         decoded = self.discord.decode_snowflake(user_id)
         if not decoded: return "🕸️ Неверный Discord ID"
         avatar_url = self.discord.avatar_url(user_id)
-        return (f"️ **Discord User**\n"
-                f"🕸️ **User ID:** `{user_id}`\n"
-                f"️ **Дата создания:** `{decoded['created_at']}`\n"
-                f"🕸️ **Возраст аккаунта:** {decoded['age_days']} дней\n"
-                f"🕸️ **Аватар:** [PNG]({avatar_url})")
+        return (
+            f"️ **Discord User**\n"
+            f"🕸️ **User ID:** `{user_id}`\n"
+            f"️ **Дата создания:** `{decoded['created_at']}`\n"
+            f"🕸️ **Возраст аккаунта:** {decoded['age_days']} дней\n"
+            f"🕸️ **Аватар:** [PNG]({avatar_url})"
+        )
 
     async def plugin_exif(self, file_id: str, bot) -> str:
         """Исправленный EXIF: поддержка фото и документов"""
@@ -1074,7 +1092,6 @@ class OSINTFramework:
         try:
             file = await bot.get_file(file_id)
             file_bytes = await file.download_as_bytearray()
-            
             # Проверка, что это действительно изображение
             try:
                 img = Image.open(io.BytesIO(file_bytes))
@@ -1082,11 +1099,9 @@ class OSINTFramework:
                 img = Image.open(io.BytesIO(file_bytes)) # Перезагрузка после verify
             except Exception:
                 return "🕸️ Файл не является корректным изображением. Отправьте JPG/PNG/TIFF."
-
             exif_data = img._getexif()
             if not exif_data:
                 return "🕸️ **EXIF:** Метаданные отсутствуют.\n️ Отправьте фото как 'Файл' (без сжатия Telegram)."
-
             from PIL.ExifTags import TAGS
             decoded = {}
             for tag_id, value in exif_data.items():
@@ -1095,7 +1110,6 @@ class OSINTFramework:
                     try: value = value.decode('utf-8', errors='ignore')
                     except: value = str(value)
                 decoded[tag] = value
-
             res = "🕸️ **EXIF Метаданные:**\n"
             important_tags = ["DateTimeOriginal", "DateTime", "Make", "Model", "Software",
                               "GPSInfo", "DateTimeDigitized", "LensModel", "ExifVersion",
@@ -1166,10 +1180,15 @@ async def start_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             code = param.replace("mirror_", "")
             creator = await fw.db.activate_mirror(uid, code)
             if creator: await update.message.reply_text(f"🪞 Зеркало активировано!")
-    
     balance = "♾️ Admin" if user_data.get('is_admin') else user_data['requests_left']
     await update.message.reply_text(
-        f"🕸️ **OSINT v15.2 ENTERPRISE**\n👤 **ID:** `{uid}`\n💰 **Баланс:** {balance}\n🔧 **Статус:** {' Admin' if user_data.get('is_admin') else 'User'}\n🕸️ Выберите инструмент:",
+        (
+            f"🕸️ **OSINT v15.2 ENTERPRISE**\n"
+            f"👤 **ID:** `{uid}`\n"
+            f"💰 **Баланс:** {balance}\n"
+            f"🔧 **Статус:** {' Admin' if user_data.get('is_admin') else 'User'}\n"
+            f"🕸️ Выберите инструмент:"
+        ),
         reply_markup=KB_MAIN, parse_mode="Markdown"
     )
 
@@ -1181,15 +1200,17 @@ async def balance_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     balance = "️ Admin/Premium" if user_data.get('is_admin') or user_data.get('is_premium') else user_data['requests_left']
     rate_stats = fw.limiter.get_stats(uid)
     await update.message.reply_text(
-        f"📊 **ВАШ БАЛАНС**\n\n"
-        f"💰 Доступно запросов: **{balance}**\n"
-        f"📈 Всего использовано: **{user_data.get('total_requests', 0)}**\n"
-        f"👑 Premium: **{'✅ Да' if user_data.get('is_premium') else '❌ Нет'}**\n"
-        f"🚫 Забанен: **{'✅ Да' if user_data.get('is_banned') else '❌ Нет'}**\n\n"
-        f"📡 **Лимиты:**\n"
-        f"• В минуту: {rate_stats['minute']}\n"
-        f"• В час: {rate_stats['hourly']}\n"
-        f"• В день: {rate_stats['daily']}",
+        (
+            f"📊 **ВАШ БАЛАНС**\n"
+            f"💰 Доступно запросов: **{balance}**\n"
+            f"📈 Всего использовано: **{user_data.get('total_requests', 0)}**\n"
+            f"👑 Premium: **{'✅ Да' if user_data.get('is_premium') else '❌ Нет'}**\n"
+            f"🚫 Забанен: **{'✅ Да' if user_data.get('is_banned') else '❌ Нет'}**\n"
+            f"📡 **Лимиты:**\n"
+            f"• В минуту: {rate_stats['minute']}\n"
+            f"• В час: {rate_stats['hourly']}\n"
+            f"• В день: {rate_stats['daily']}"
+        ),
         parse_mode="Markdown"
     )
 
@@ -1201,7 +1222,10 @@ async def ban_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         target_id = int(ctx.args[0])
         reason = " ".join(ctx.args[1:]) if len(ctx.args) > 1 else "Нарушение правил"
         if await fw.db.ban_user(target_id, reason):
-            await update.message.reply_text(f"✅ Пользователь `{target_id}` заблокирован.\nПричина: {reason}", parse_mode="Markdown")
+            await update.message.reply_text(
+                f"✅ Пользователь `{target_id}` заблокирован.\nПричина: {reason}", 
+                parse_mode="Markdown"
+            )
             try: await ctx.bot.send_message(target_id, f"🚫 Ваш аккаунт заблокирован.\nПричина: {reason}")
             except: pass
         else: await update.message.reply_text("❌ Не удалось заблокировать пользователя")
@@ -1228,7 +1252,6 @@ async def callback_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     data = q.data
     uid = q.from_user.id
     if await check_banned(uid, q, is_callback=True): return
-
     if data == "menu":
         return await q.edit_message_text("🕸️ **OSINT v15.2:**", reply_markup=KB_MAIN, parse_mode="Markdown")
     if data == "balance":
@@ -1245,10 +1268,18 @@ async def callback_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         stats = await fw.db.get_stats()
         breach_stats = await fw.breach_db.get_stats()
         return await q.edit_message_text(
-            f"📊 **СТАТИСТИКА БОТА**\n👥 Пользователи: {stats['total_users']}\n🟢 Активные (24ч): {stats['active_24h']}\n"
-            f"💰 Premium: {stats['premium_users']}\n🚫 Забанено: {stats['banned_users']}\n"
-            f"🔍 Запросов: {stats['total_requests']}\n📅 Сегодня: {stats['today_requests']}\n"
-            f"🗄️ Breaches: {breach_stats['breaches']}\n📱 Phones: {breach_stats['phones']}\n⏱️ Аптайм: {stats['uptime']}",
+            (
+                f"📊 **СТАТИСТИКА БОТА**\n"
+                f"👥 Пользователи: {stats['total_users']}\n"
+                f"🟢 Активные (24ч): {stats['active_24h']}\n"
+                f"💰 Premium: {stats['premium_users']}\n"
+                f"🚫 Забанено: {stats['banned_users']}\n"
+                f"🔍 Запросов: {stats['total_requests']}\n"
+                f"📅 Сегодня: {stats['today_requests']}\n"
+                f"🗄️ Breaches: {breach_stats['breaches']}\n"
+                f"📱 Phones: {breach_stats['phones']}\n"
+                f"⏱️ Аптайм: {stats['uptime']}"
+            ),
             reply_markup=KB_ADMIN, parse_mode="Markdown"
         )
     if data == "admin_users":
@@ -1283,9 +1314,7 @@ async def callback_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def message_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     text = update.message.text.strip() if update.message.text else ""
-    
     if await check_banned(uid, update.message): return
-
     # Проверка пароля админа
     if admin_sessions.get(uid, {}).get("state") == "wait_pass":
         if text == ADMIN_PASSWORD:
@@ -1295,7 +1324,6 @@ async def message_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("❌ Неверный пароль!")
             admin_sessions.pop(uid, None)
             return
-
     # Обработка инструмента
     if uid in user_states:
         tool = user_states[uid]["tool"]
@@ -1309,7 +1337,6 @@ async def message_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 user_data = await fw.db.get_user(uid)
                 if not user_data or user_data.get('is_banned'): return await update.message.reply_text("🕸️ Вы заблокированы!")
                 return await update.message.reply_text(f"️ {reason}\n💡 Пополните баланс: /referral или /mirror")
-
             func = fw.plugins.get(tool)
             res = ""
             if tool == "tg_id":
@@ -1327,11 +1354,9 @@ async def message_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 res = await func(file_id, ctx.bot)
             else:
                 res = await func(text) if asyncio.iscoroutinefunction(func) else func(text)
-
             response_time = time.time() - start_time
             user_data = await fw.db.get_user(uid)
             bal = "♾️" if user_data.get('is_admin') else user_data['requests_left']
-            
             if len(res) > 4000:
                 for chunk in [res[i:i+4000] for i in range(0, len(res), 4000)]:
                     await update.message.reply_text(chunk, parse_mode="Markdown")
@@ -1346,7 +1371,6 @@ async def message_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             user_states.pop(uid, None)
             await update.message.reply_text("🕸️ Следующий запрос:", reply_markup=KB_MAIN)
         return
-
     await update.message.reply_text("🕸️ Используйте кнопки меню 👇", reply_markup=KB_MAIN)
 
 async def main():
@@ -1360,7 +1384,6 @@ async def main():
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
     app.add_handler(MessageHandler(filters.PHOTO | filters.Document.ALL, message_handler))
     logger.info("🕸️ OSINT v15.2 ENTERPRISE started!")
-    
     if os.environ.get('RENDER') or os.environ.get('PORT'):
         from aiohttp import web
         async def handle(request): return web.Response(text="OSINT v15.2 ENTERPRISE 🕸️")
@@ -1370,7 +1393,6 @@ async def main():
         await runner.setup()
         site = web.TCPSite(runner, '0.0.0.0', int(os.environ.get('PORT', PORT)))
         await site.start()
-        
     await app.initialize()
     await app.start()
     await app.updater.start_polling()
