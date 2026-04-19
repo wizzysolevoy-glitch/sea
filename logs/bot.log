@@ -1,0 +1,120 @@
+2026-04-19 02:22:35,912 [INFO] OSINT_FW:78 - Database engine initialized & migrated
+2026-04-19 02:22:35,912 [INFO] OSINT_FW:78 - Bot controller initialized
+2026-04-19 02:22:36,370 [INFO] OSINT_FW:78 - Starting polling loop...
+2026-04-19 02:26:07,184 [INFO] OSINT_FW:78 - Database engine initialized & migrated
+2026-04-19 02:26:07,185 [INFO] OSINT_FW:78 - Bot controller initialized
+2026-04-19 02:26:07,637 [INFO] OSINT_FW:78 - Starting polling loop...
+2026-04-19 09:52:45,274 [INFO] OSINT_FW:75 - 🕸️ Database initialized
+2026-04-19 09:52:45,275 [INFO] OSINT_FW:75 - 🕸️ Bot initialized
+2026-04-19 09:52:45,703 [INFO] OSINT_FW:75 - 🕸️ OSINT Bot v8.0 запущен
+2026-04-19 09:52:49,084 [INFO] OSINT_FW:75 - 🕸️ Database initialized
+2026-04-19 09:52:49,084 [INFO] OSINT_FW:75 - 🕸️ Bot initialized
+2026-04-19 09:52:49,518 [INFO] OSINT_FW:75 - 🕸️ OSINT Bot v8.0 запущен
+2026-04-19 10:01:51,291 [INFO] OSINT_FW:166 - 🕸️ Database initialized
+2026-04-19 10:01:51,292 [INFO] OSINT_FW:166 - 🕸️ Bot components initialized
+2026-04-19 10:01:51,722 [INFO] OSINT_FW:166 - 🕸️ OSINT Bot v10.0 запущен
+2026-04-19 10:01:58,736 [ERROR] OSINT_FW:170 - Unhandled error: table users has no column named referral_code
+Traceback (most recent call last):
+  File "C:\Users\hizz\AppData\Local\Programs\Python\Python312\Lib\site-packages\telegram\ext\_application.py", line 1315, in process_update
+    await coroutine
+  File "C:\Users\hizz\AppData\Local\Programs\Python\Python312\Lib\site-packages\telegram\ext\_handlers\basehandler.py", line 159, in handle_update
+    return await self.callback(update, context)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\hizz\Desktop\osint_bot\k2k.py", line 1014, in _cmd_start
+    await self.db.register_user(
+  File "C:\Users\hizz\Desktop\osint_bot\k2k.py", line 317, in register_user
+    await db.execute("""
+  File "C:\Users\hizz\AppData\Local\Programs\Python\Python312\Lib\site-packages\aiosqlite\core.py", line 223, in execute
+    cursor = await self._execute(self._conn.execute, sql, parameters)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\hizz\AppData\Local\Programs\Python\Python312\Lib\site-packages\aiosqlite\core.py", line 160, in _execute
+    return await future
+           ^^^^^^^^^^^^
+  File "C:\Users\hizz\AppData\Local\Programs\Python\Python312\Lib\site-packages\aiosqlite\core.py", line 63, in _connection_worker_thread
+    result = function()
+             ^^^^^^^^^^
+sqlite3.OperationalError: table users has no column named referral_code
+2026-04-19 10:02:03,658 [ERROR] OSINT_FW:170 - Unhandled error: table users has no column named referral_code
+Traceback (most recent call last):
+  File "C:\Users\hizz\AppData\Local\Programs\Python\Python312\Lib\site-packages\telegram\ext\_application.py", line 1315, in process_update
+    await coroutine
+  File "C:\Users\hizz\AppData\Local\Programs\Python\Python312\Lib\site-packages\telegram\ext\_handlers\basehandler.py", line 159, in handle_update
+    return await self.callback(update, context)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\hizz\Desktop\osint_bot\k2k.py", line 1014, in _cmd_start
+    await self.db.register_user(
+  File "C:\Users\hizz\Desktop\osint_bot\k2k.py", line 317, in register_user
+    await db.execute("""
+  File "C:\Users\hizz\AppData\Local\Programs\Python\Python312\Lib\site-packages\aiosqlite\core.py", line 223, in execute
+    cursor = await self._execute(self._conn.execute, sql, parameters)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\hizz\AppData\Local\Programs\Python\Python312\Lib\site-packages\aiosqlite\core.py", line 160, in _execute
+    return await future
+           ^^^^^^^^^^^^
+  File "C:\Users\hizz\AppData\Local\Programs\Python\Python312\Lib\site-packages\aiosqlite\core.py", line 63, in _connection_worker_thread
+    result = function()
+             ^^^^^^^^^^
+sqlite3.OperationalError: table users has no column named referral_code
+2026-04-19 10:02:05,093 [ERROR] OSINT_FW:170 - Unhandled error: table users has no column named referral_code
+Traceback (most recent call last):
+  File "C:\Users\hizz\AppData\Local\Programs\Python\Python312\Lib\site-packages\telegram\ext\_application.py", line 1315, in process_update
+    await coroutine
+  File "C:\Users\hizz\AppData\Local\Programs\Python\Python312\Lib\site-packages\telegram\ext\_handlers\basehandler.py", line 159, in handle_update
+    return await self.callback(update, context)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\hizz\Desktop\osint_bot\k2k.py", line 1014, in _cmd_start
+    await self.db.register_user(
+  File "C:\Users\hizz\Desktop\osint_bot\k2k.py", line 317, in register_user
+    await db.execute("""
+  File "C:\Users\hizz\AppData\Local\Programs\Python\Python312\Lib\site-packages\aiosqlite\core.py", line 223, in execute
+    cursor = await self._execute(self._conn.execute, sql, parameters)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\hizz\AppData\Local\Programs\Python\Python312\Lib\site-packages\aiosqlite\core.py", line 160, in _execute
+    return await future
+           ^^^^^^^^^^^^
+  File "C:\Users\hizz\AppData\Local\Programs\Python\Python312\Lib\site-packages\aiosqlite\core.py", line 63, in _connection_worker_thread
+    result = function()
+             ^^^^^^^^^^
+sqlite3.OperationalError: table users has no column named referral_code
+2026-04-19 10:02:05,915 [ERROR] OSINT_FW:170 - Unhandled error: table users has no column named referral_code
+Traceback (most recent call last):
+  File "C:\Users\hizz\AppData\Local\Programs\Python\Python312\Lib\site-packages\telegram\ext\_application.py", line 1315, in process_update
+    await coroutine
+  File "C:\Users\hizz\AppData\Local\Programs\Python\Python312\Lib\site-packages\telegram\ext\_handlers\basehandler.py", line 159, in handle_update
+    return await self.callback(update, context)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\hizz\Desktop\osint_bot\k2k.py", line 1014, in _cmd_start
+    await self.db.register_user(
+  File "C:\Users\hizz\Desktop\osint_bot\k2k.py", line 317, in register_user
+    await db.execute("""
+  File "C:\Users\hizz\AppData\Local\Programs\Python\Python312\Lib\site-packages\aiosqlite\core.py", line 223, in execute
+    cursor = await self._execute(self._conn.execute, sql, parameters)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\hizz\AppData\Local\Programs\Python\Python312\Lib\site-packages\aiosqlite\core.py", line 160, in _execute
+    return await future
+           ^^^^^^^^^^^^
+  File "C:\Users\hizz\AppData\Local\Programs\Python\Python312\Lib\site-packages\aiosqlite\core.py", line 63, in _connection_worker_thread
+    result = function()
+             ^^^^^^^^^^
+sqlite3.OperationalError: table users has no column named referral_code
+2026-04-19 10:02:06,885 [ERROR] OSINT_FW:170 - Unhandled error: table users has no column named referral_code
+Traceback (most recent call last):
+  File "C:\Users\hizz\AppData\Local\Programs\Python\Python312\Lib\site-packages\telegram\ext\_application.py", line 1315, in process_update
+    await coroutine
+  File "C:\Users\hizz\AppData\Local\Programs\Python\Python312\Lib\site-packages\telegram\ext\_handlers\basehandler.py", line 159, in handle_update
+    return await self.callback(update, context)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\hizz\Desktop\osint_bot\k2k.py", line 1014, in _cmd_start
+    await self.db.register_user(
+  File "C:\Users\hizz\Desktop\osint_bot\k2k.py", line 317, in register_user
+    await db.execute("""
+  File "C:\Users\hizz\AppData\Local\Programs\Python\Python312\Lib\site-packages\aiosqlite\core.py", line 223, in execute
+    cursor = await self._execute(self._conn.execute, sql, parameters)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\hizz\AppData\Local\Programs\Python\Python312\Lib\site-packages\aiosqlite\core.py", line 160, in _execute
+    return await future
+           ^^^^^^^^^^^^
+  File "C:\Users\hizz\AppData\Local\Programs\Python\Python312\Lib\site-packages\aiosqlite\core.py", line 63, in _connection_worker_thread
+    result = function()
+             ^^^^^^^^^^
+sqlite3.OperationalError: table users has no column named referral_code
